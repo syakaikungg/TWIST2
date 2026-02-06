@@ -12,6 +12,10 @@ pkl
 phc/
 
 motion_data/
+motion_data_23dof/
+motion_data_29dof/
+*.egg-info/
+TWIST2_full.zip
 
 ignore/
 
