@@ -45,6 +45,12 @@ from .g1.g1_mimic_distill_config import G1MimicStuRLCfg, G1MimicStuRLCfgDAgger
 from .g1.g1_mimic_future import G1MimicFuture
 from .g1.g1_mimic_future_config import G1MimicStuFutureCfg, G1MimicStuFutureCfgDAgger
 
+# 23DOF G1
+from .g1.g1_23dof_config import (
+    G1_23DOF_MimicPrivCfg, G1_23DOF_MimicPrivCfgPPO,
+    G1_23DOF_MimicStuFutureCfg, G1_23DOF_MimicStuFutureCfgDAgger
+)
+
 from legged_gym.gym_utils.task_registry import task_registry
 
 
@@ -54,5 +60,9 @@ task_registry.register("g1_stu_mimic", G1MimicDistill, G1MimicStuCfg(), G1MimicS
 task_registry.register("g1_priv_mimic", G1MimicDistill, G1MimicPrivCfg(), G1MimicPrivCfgPPO())
 task_registry.register("g1_stu_rl", G1MimicDistill, G1MimicStuRLCfg(), G1MimicStuRLCfgDAgger())
 task_registry.register("g1_stu_future", G1MimicFuture, G1MimicStuFutureCfg(), G1MimicStuFutureCfgDAgger())
+
+# 23DOF G1
+task_registry.register("g1_23dof_priv", G1MimicDistill, G1_23DOF_MimicPrivCfg(), G1_23DOF_MimicPrivCfgPPO())
+task_registry.register("g1_23dof_future", G1MimicFuture, G1_23DOF_MimicStuFutureCfg(), G1_23DOF_MimicStuFutureCfgDAgger())
 
 
