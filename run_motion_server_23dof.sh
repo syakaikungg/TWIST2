@@ -2,10 +2,13 @@
 # 23DOF用モーション配信スクリプト
 # 使い方: bash run_motion_server_23dof.sh [motion_file]
 
+source ~/miniconda3/bin/activate twist2
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+
 script_dir=$(dirname $(realpath $0))
 motion_file=${1:-"${script_dir}/assets/example_motions/0807_yanjie_walk_001.pkl"}
 
-cd deploy_real
+cd "${script_dir}/deploy_real"
 
 CUDA_VISIBLE_DEVICES="" python -c "
 import sys; m=type(sys)('isaacgym'); m.torch_utils=type(sys)('t'); sys.modules['isaacgym']=m; sys.modules['isaacgym.torch_utils']=m.torch_utils

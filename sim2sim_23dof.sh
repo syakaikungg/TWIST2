@@ -9,6 +9,10 @@
 
 set -e
 
+# Activate conda environment
+source ~/miniconda3/bin/activate twist2
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+
 cd "$(dirname "$0")"
 
 POLICY_PATH=${1:-"assets/ckpts/g1_23dof_trained.onnx"}
