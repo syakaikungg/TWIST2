@@ -1,0 +1,17 @@
+# Requirements for 23DOF sim2sim (MuJoCo simulation)
+# Install: pip install -r requirements_sim2sim.txt
+#
+# Note: Use Python 3.8 (conda create -n twist2 python=3.8)
+# Note: Redis server must be installed separately (apt install redis-server)
+
+mujoco==3.2.3
+numpy==1.23.0
+onnx==1.17.0
+onnxruntime-gpu==1.19.2
+torch==2.4.1
+torchvision==0.19.1
+redis==6.1.1
+scipy==1.10.1
+rich>=13.0.0
+tqdm>=4.65.0
+
