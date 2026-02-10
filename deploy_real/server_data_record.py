@@ -247,11 +247,13 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="Record 'mimic_obs' from Redis.")
     cur_time = datetime.now().strftime("%Y%m%d_%H%M")
-    parser.add_argument("--data_folder", default=f"/home/ANT.AMAZON.COM/yanjieze/projects/TWIST2/TWIST2-clean/deploy_real/twist2_demonstration", help="data folder")
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    default_data_folder = os.path.join(script_dir, "../recorded_motions")
+    parser.add_argument("--data_folder", default=default_data_folder, help="data folder")
     parser.add_argument("--task_name", default=f"{cur_time}", help="task name")
     parser.add_argument("--frequency", default=30, type=int)
     parser.add_argument("--robot", default="unitree_g1", choices=["unitree_g1"], help="robot name")
-    parser.add_argument("--robot_ip", default="192.168.123.164", help="robot ip")
+    parser.add_argument("--robot_ip", default="localhost", help="robot ip")
     
     args = parser.parse_args()
 

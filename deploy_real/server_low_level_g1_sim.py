@@ -338,6 +338,11 @@ class RealTimePolicyController:
                     raw_action = np.clip(raw_action, -10., 10.)
                     scaled_actions = raw_action * self.action_scale
                     pd_target = scaled_actions + self.default_dof_pos
+                    
+                    # Fix waist roll and pitch (indices 13, 14) to default values
+                    # Only waist yaw (index 12) can move
+                    pd_target[13] = self.default_dof_pos[13]  # waist_roll fixed
+                    pd_target[14] = self.default_dof_pos[14]  # waist_pitch fixed
 
                     # self.redis_client.set("action_low_level_unitree_g1", json.dumps(raw_action.tolist()))
                     

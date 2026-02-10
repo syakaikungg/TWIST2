@@ -14,7 +14,7 @@ actual_human_height=1.6
 python xrobot_teleop_to_robot_w_hand.py --robot unitree_g1 \
              --actual_human_height $actual_human_height \
              --redis_ip $redis_ip \
-             --target_fps 100 \
+             --target_fps 80\
              --measure_fps 1 \
-            #  --smooth \
+             --smooth \
             #  --pinch_mode

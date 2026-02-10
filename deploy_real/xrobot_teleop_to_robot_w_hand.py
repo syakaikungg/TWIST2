@@ -107,13 +107,14 @@ def extract_mimic_obs_whole_body(qpos, last_qpos, dt=1/30):
 
 
 class StateMachine:
-    def __init__(self, enable_smooth=False, smooth_window_size=5, use_pinch=False):
+    def __init__(self, enable_smooth=False, smooth_window_size=5, use_pinch=False, auto_start_teleop=True):
         """
         State process for teleoperation:
         idle -> teleop -> pause -> teleop ... -> idle -> exit
         """
-        self.state = "idle"
-        self.previous_state = "idle"
+        # Auto-start in teleop mode if enabled (no button press needed)
+        self.state = "teleop" if auto_start_teleop else "idle"
+        self.previous_state = "teleop" if auto_start_teleop else "idle"
         self.right_key_one_was_pressed = False
         self.left_key_one_was_pressed = False
         self.left_axis_click_was_pressed = False
@@ -641,8 +642,9 @@ class XRobotTeleopToRobot:
         t_action = int(time.time() * 1000) # current timestamp in ms
         self.redis_pipeline.set("t_action", t_action)
 
-        # execute the pipeline once
+        # execute the pipeline once and reset for next use
         self.redis_pipeline.execute()
+        self.redis_pipeline.reset()
 
     
     def send_controller_data_to_redis(self, controller_data):
