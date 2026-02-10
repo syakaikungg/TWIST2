@@ -41,6 +41,16 @@ echo "Policy: $POLICY_PATH"
 echo "XML: $XML_PATH"
 echo "=========================================="
 
+# Initialize Redis with default standing pose (23DOF)
+redis-server --daemonize yes 2>/dev/null || true
+python -c "
+import redis, json, numpy as np
+r = redis.Redis()
+obs = np.array([0,0,0.793,0,0,0, -0.2,0,0,0.4,-0.2,0, -0.2,0,0,0.4,-0.2,0, 0, 0,0.4,0,1.2,0, 0,-0.4,0,1.2,0])
+r.set('action_body_unitree_g1_23dof', json.dumps(obs.tolist()))
+print('Default standing pose sent to Redis (29 dims)')
+"
+
 cd deploy_real
 python server_low_level_g1_23dof_sim.py \
     --xml "../$XML_PATH" \
