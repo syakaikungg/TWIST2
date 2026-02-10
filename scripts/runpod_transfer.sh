@@ -36,3 +36,4 @@ echo "次のステップ: RunPodにSSH接続してセットアップスクリプ
 echo "  ssh root@$HOST -p $PORT -i ~/.ssh/id_ed25519"
 echo "  bash /workspace/TWIST2/scripts/runpod_setup.sh"
 
+

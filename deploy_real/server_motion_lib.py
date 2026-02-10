@@ -4,7 +4,7 @@ import time
 import redis
 import json
 import numpy as np
-import isaacgym
+# import isaacgym  # Not needed for motion server
 import torch
 from rich import print
 import os
@@ -28,7 +28,7 @@ def build_mimic_obs(
     """
     Build the mimic_obs at time-step t_step, referencing the code in MimicRunner.
     """
-    device = torch.device("cuda")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # Build times
     motion_times = torch.tensor([t_step * control_dt], device=device).unsqueeze(-1)
     obs_motion_times = tar_motion_steps * control_dt + motion_times
@@ -239,7 +239,7 @@ def main(args, xml_file, robot_base):
             
             t_step += 1
             if t_step >= num_steps:
-                break
+                t_step = 0  # Loop motion
             # Sleep to maintain real-time pace
             elapsed = time.time() - t0
             if elapsed < control_dt:

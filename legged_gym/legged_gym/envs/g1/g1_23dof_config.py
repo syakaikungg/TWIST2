@@ -427,3 +427,4 @@ class G1_23DOF_MimicStuFutureCfgDAgger(G1_23DOF_MimicStuFutureCfg):
         moe_topk = None
         load_balancing_loss_weight = 0.01
 
+

@@ -100,3 +100,4 @@ echo ""
 echo "To export ONNX model:"
 echo "  python save_onnx.py --task g1_23dof_future --run_name ${EXP_NAME}_student"
 
+

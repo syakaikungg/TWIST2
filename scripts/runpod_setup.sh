@@ -90,3 +90,4 @@ echo "  tmux new -s train"
 echo "  bash /workspace/TWIST2/scripts/runpod_train.sh"
 echo "  # Ctrl+B, D でデタッチ"
 
+

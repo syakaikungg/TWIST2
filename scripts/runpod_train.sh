@@ -53,3 +53,4 @@ echo ""
 echo "ローカルPCへのダウンロード:"
 echo "  scp -P <port> -r root@<host>:/workspace/TWIST2/logs/ ~/workspace/sakai/TWIST2/TWIST2/logs/"
 
+

@@ -44,3 +44,4 @@ python server_low_level_g1_23dof_sim.py \
     --device cuda \
     --measure_fps
 
+
