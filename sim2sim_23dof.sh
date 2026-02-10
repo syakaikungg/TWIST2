@@ -11,7 +11,7 @@ set -e
 
 cd "$(dirname "$0")"
 
-POLICY_PATH=${1:-"assets/ckpts/g1_23dof_policy.onnx"}
+POLICY_PATH=${1:-"assets/ckpts/g1_23dof_trained.onnx"}
 XML_PATH="assets/g1/g1_sim2sim_23dof.xml"
 
 if [ ! -f "$POLICY_PATH" ]; then
@@ -41,7 +41,7 @@ cd deploy_real
 python server_low_level_g1_23dof_sim.py \
     --xml "../$XML_PATH" \
     --policy "../$POLICY_PATH" \
-    --device cuda \
-    --measure_fps
+    --device cpu \
+    --policy_frequency 50
 
 
