@@ -15,6 +15,7 @@ TWIST2 23DOF G1 Simulation Controller
 import argparse
 import json
 import time
+import struct
 import numpy as np
 import redis
 import mujoco
@@ -30,6 +31,13 @@ try:
     import onnxruntime as ort
 except ImportError:
     ort = None
+
+try:
+    import zmq
+    import cv2
+    HAS_ZMQ = True
+except ImportError:
+    HAS_ZMQ = False
 
 
 class OnnxPolicyWrapper:
@@ -81,9 +89,16 @@ class RealTimePolicyController23DOF:
                  measure_fps=False,
                  limit_fps=True,
                  policy_frequency=50,
+                 stream_camera=False,
+                 stream_port=5555,
+                 stream_width=640,
+                 stream_height=480,
+                 stream_fps=30,
                  ):
         self.measure_fps = measure_fps
         self.limit_fps = limit_fps
+        self.stream_camera = stream_camera
+        self.stream_fps = stream_fps
         self.redis_client = None
         try:
             self.redis_client = redis.Redis(host='localhost', port=6379, db=0)
@@ -105,6 +120,28 @@ class RealTimePolicyController23DOF:
         self.viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_TRANSPARENT] = 0
         self.viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_COM] = 0
         self.viewer.cam.distance = 2.0
+
+        # オフスクリーンレンダラー + ZMQ 配信
+        self.zmq_socket = None
+        self.offscreen_renderer = None
+        if self.stream_camera and HAS_ZMQ:
+            self.stream_width = stream_width
+            self.stream_height = stream_height
+            
+            # オフスクリーンレンダラーの作成
+            self.offscreen_renderer = mujoco.Renderer(self.model, stream_height, stream_width)
+            
+            # ZMQ PUB ソケット
+            zmq_ctx = zmq.Context()
+            self.zmq_socket = zmq_ctx.socket(zmq.PUB)
+            self.zmq_socket.bind(f"tcp://*:{stream_port}")
+            self.zmq_socket.setsockopt(zmq.SNDHWM, 2)  # 送信キューを小さく
+            print(f"[Camera Stream] ZMQ PUB on tcp://*:{stream_port}")
+            print(f"[Camera Stream] Resolution: {stream_width}x{stream_height} @ {stream_fps}fps")
+            print(f"[Camera Stream] 受信: python data_utils/vision_client.py --server 127.0.0.1 --port {stream_port}")
+            self.last_stream_time = 0
+        elif self.stream_camera and not HAS_ZMQ:
+            print("[Warning] --stream_camera requires zmq and cv2. Install: pip install pyzmq opencv-python")
 
         # 23DOF Configuration
         self.num_actions = 23
@@ -332,6 +369,31 @@ class RealTimePolicyController23DOF:
                                          self.viewer.scn, self.viewer.ctx)
                         mp4_writer.append_data(frame)
 
+                    # ZMQ カメラストリーミング
+                    if self.zmq_socket is not None:
+                        now = time.time()
+                        if now - self.last_stream_time >= 1.0 / self.stream_fps:
+                            self.last_stream_time = now
+                            try:
+                                # オフスクリーンレンダリング
+                                self.offscreen_renderer.update_scene(self.data, self.viewer.cam)
+                                frame_rgb = self.offscreen_renderer.render()
+                                
+                                # JPEG エンコード
+                                frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+                                _, jpeg_data = cv2.imencode('.jpg', frame_bgr, 
+                                    [cv2.IMWRITE_JPEG_QUALITY, 80])
+                                jpeg_bytes = jpeg_data.tobytes()
+                                
+                                # VisionClient 互換フォーマット: [width][height][jpeg_len][jpeg_data]
+                                header = struct.pack('iii', 
+                                    self.stream_width, self.stream_height, len(jpeg_bytes))
+                                self.zmq_socket.send(header + jpeg_bytes, zmq.NOBLOCK)
+                            except zmq.Again:
+                                pass  # スキップ（受信者がいない場合）
+                            except Exception as e:
+                                pass  # レンダリングエラーは無視
+
                 # PD control
                 torque = self.stiffness * (pd_target - dof_pos) - self.damping * dof_vel
                 torque = np.clip(torque, -self.torque_limits, self.torque_limits)
@@ -372,6 +434,16 @@ def main():
                        help='Disable FPS limiting')
     parser.add_argument('--policy_frequency', type=int, default=50,
                        help='Policy execution frequency in Hz')
+    parser.add_argument('--stream_camera', action='store_true',
+                       help='Stream virtual camera via ZMQ')
+    parser.add_argument('--stream_port', type=int, default=5555,
+                       help='ZMQ port for camera stream (default: 5555)')
+    parser.add_argument('--stream_width', type=int, default=640,
+                       help='Stream frame width (default: 640)')
+    parser.add_argument('--stream_height', type=int, default=480,
+                       help='Stream frame height (default: 480)')
+    parser.add_argument('--stream_fps', type=int, default=30,
+                       help='Stream FPS (default: 30)')
     
     args = parser.parse_args()
     
@@ -383,6 +455,11 @@ def main():
         measure_fps=args.measure_fps,
         limit_fps=not args.no_limit_fps,
         policy_frequency=args.policy_frequency,
+        stream_camera=args.stream_camera,
+        stream_port=args.stream_port,
+        stream_width=args.stream_width,
+        stream_height=args.stream_height,
+        stream_fps=args.stream_fps,
     )
     
     controller.run()

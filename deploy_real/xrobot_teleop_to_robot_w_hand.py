@@ -619,6 +619,10 @@ class XRobotTeleopToRobot:
         # Default fallback
         return [0.0, 0.0]
             
+    # 29DOF -> 23DOF joint index mapping (remove waist_roll, waist_pitch,
+    # left_wrist_pitch, left_wrist_yaw, right_wrist_pitch, right_wrist_yaw)
+    _29TO23_KEEP = [i for i in range(29) if i not in [13, 14, 19, 20, 26, 27]]
+
     def send_to_redis(self, mimic_obs, neck_data=None):
         """Send mimic observations to Redis"""
         
@@ -627,6 +631,13 @@ class XRobotTeleopToRobot:
             assert len(mimic_obs) == 35, f"Expected 35 mimic obs dims, got {len(mimic_obs)}"
             # Send to both keys for compatibility
             self.redis_pipeline.set("action_body_unitree_g1_with_hands", json.dumps(mimic_obs.tolist()))
+
+            # Also send 23DOF version for sim2sim_23dof / sim2real_23dof
+            obs_arr = np.asarray(mimic_obs)
+            root_info = obs_arr[:6]                          # vx, vy, z, roll, pitch, yaw_vel
+            joints_23 = obs_arr[6:][self._29TO23_KEEP]       # 29 joints -> 23 joints
+            mimic_obs_23 = np.concatenate([root_info, joints_23])  # 6 + 23 = 29 dims
+            self.redis_pipeline.set("action_body_unitree_g1_23dof", json.dumps(mimic_obs_23.tolist()))
         
         # Send hand action to redis
         if self.redis_client is not None:

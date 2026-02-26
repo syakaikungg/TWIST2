@@ -51,11 +51,21 @@ r.set('action_body_unitree_g1_23dof', json.dumps(obs.tolist()))
 print('Default standing pose sent to Redis (29 dims)')
 "
 
+# カメラストリーミングオプション
+# --stream_camera を追加すると ZMQ でカメラ映像を配信
+# 受信: python deploy_real/data_utils/vision_client.py --server 127.0.0.1 --port 5555
+STREAM_OPTS=""
+if [ "${STREAM_CAMERA:-0}" = "1" ]; then
+    STREAM_OPTS="--stream_camera --stream_port ${STREAM_PORT:-5555} --stream_fps ${STREAM_FPS:-30}"
+    echo "Camera streaming enabled on port ${STREAM_PORT:-5555}"
+fi
+
 cd deploy_real
 python server_low_level_g1_23dof_sim.py \
     --xml "../$XML_PATH" \
     --policy "../$POLICY_PATH" \
     --device cpu \
-    --policy_frequency 50
+    --policy_frequency 50 \
+    $STREAM_OPTS
 
 

@@ -110,9 +110,7 @@ class VisionClient:
         if self.frame_count % 30 == 0:
             real_time_fps = len(self.frame_times) / self.time_window
             elapsed = now - self.start_time
-            if verbose:
-                print(f"[VisionClient] FPS: {real_time_fps:.2f}, Frames: {self.frame_count}, Elapsed: {elapsed:.2f}s")
-                print(print_info, "\n")
+            print(f"[VisionClient] FPS: {real_time_fps:.1f} | Frames: {self.frame_count} | {print_info}")
 
     def handle_color_image(self, color_img):
         """
@@ -128,9 +126,14 @@ class VisionClient:
             if color_img.shape == self.img_shape:
                 np.copyto(self.img_array, color_img)
             else:
-                # If shape doesn't match exactly, you might need a crop/resizing.
+                # リサイズして共有メモリに収める
                 h, w = self.img_shape[0], self.img_shape[1]
-                np.copyto(self.img_array, color_img[:h, :w])
+                resized = cv2.resize(color_img, (w, h))
+                if resized.shape == self.img_shape:
+                    np.copyto(self.img_array, resized)
+                else:
+                    # チャンネル数も調整
+                    np.copyto(self.img_array, resized[:h, :w, :self.img_shape[2]])
 
         # If you want to display the image
         if self.image_show:
@@ -190,7 +193,10 @@ class VisionClient:
         self.socket.close()
         self.context.term()
         if self.image_show or self.depth_show:
-            cv2.destroyAllWindows()
+            try:
+                cv2.destroyAllWindows()
+            except cv2.error:
+                pass  # headless 環境では無視
         print("[VisionClient] Closed.")
 
     def receive_process(self):
@@ -291,28 +297,35 @@ class VisionClient:
 
 
 if __name__ == "__main__":
-    # Example usage for single camera (640x480):
+    import argparse
     from multiprocessing import shared_memory, Array, Lock
     import threading
+
+    parser = argparse.ArgumentParser(description="VisionClient - ZMQ image receiver")
+    parser.add_argument('--server', type=str, default='192.168.123.164',
+                       help='Server IP address (default: 192.168.123.164)')
+    parser.add_argument('--port', type=int, default=5556,
+                       help='ZMQ port (default: 5556)')
+    cmd_args = parser.parse_args()
     
-    # Create shared memory for single camera - 640x480 image
-    num_cameras = 2
-    image_shape = (360, 640 * num_cameras, 3)  # Height, Width, Channels for OpenCV format
-    image_shared_memory = shared_memory.SharedMemory(create=True, size=int(np.prod(image_shape) * np.uint8().itemsize * num_cameras))
+    # Create shared memory for camera image
+    num_cameras = 1
+    image_shape = (480, 640 * num_cameras, 3)  # Height, Width, Channels for OpenCV format
+    image_shared_memory = shared_memory.SharedMemory(create=True, size=int(np.prod(image_shape) * np.uint8().itemsize))
     image_array = np.ndarray(image_shape, dtype=np.uint8, buffer=image_shared_memory.buf)
     
     # Create shared memory for depth - same resolution as RGB
-    depth_shape = (360, 640)
+    depth_shape = (480, 640)
     depth_shared_memory = shared_memory.SharedMemory(create=True, size=int(np.prod(depth_shape) * np.float32().itemsize))
     depth_array = np.ndarray(depth_shape, dtype=np.float32, buffer=depth_shared_memory.buf)
     
-    # Display settings for single camera
-    image_show = True
-    depth_show = True
+    # Display settings (headless の場合は False)
+    image_show = False
+    depth_show = False
 
     client = VisionClient(
-        server_address="192.168.123.164",  # or "127.0.0.1"
-        port=5556,
+        server_address=cmd_args.server,
+        port=cmd_args.port,
         img_shape=image_shape,
         img_shm_name=image_shared_memory.name,
         depth_shape=depth_shape,
