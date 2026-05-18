@@ -1,0 +1,56 @@
+---
+description: TWIST2プロジェクトの概要。全てのファイル操作やコード変更時に参照される基本情報。
+globs:
+alwaysApply: true
+---
+
+# TWIST2 プロジェクト概要
+
+## プロジェクトについて
+TWIST2 (Teleoperated Whole-Body Imitation System 2) は、Unitree G1 ヒューマノイドロボットの全身制御・テレオペレーションシステムである。
+Stanford 大学の Yanjie Ze らによる研究プロジェクト。
+
+- **論文**: https://arxiv.org/abs/2511.02832
+- **ライセンス**: BSD-3-Clause
+
+## 主要コンポーネント
+
+| コンポーネント | 場所 | 説明 |
+|---|---|---|
+| `legged_gym/` | IsaacGym環境 | RL学習環境・設定・学習スクリプト |
+| `rsl_rl/` | 強化学習ライブラリ | PPO, DAgger, ニューラルネットワーク定義 |
+| `pose/` | モーションリターゲティング | poselib, kinematics_model |
+| `deploy_real/` | デプロイメント | MuJoCo sim2sim / 実機制御サーバ |
+| `assets/` | ロボットモデル・データ | URDF/XML, ONNX, モーションデータ (.pkl) |
+| `scripts/` | ユーティリティ | データ変換, 可視化 |
+
+## ロボット構成
+
+### 29DOF (オリジナル)
+- 脚: 6DOF × 2 = 12
+- 腰: 3DOF (waist_yaw, waist_roll, waist_pitch)
+- 腕: 7DOF × 2 = 14 (shoulder×3 + elbow + wrist×3)
+
+### 23DOF (簡略版)
+- 脚: 6DOF × 2 = 12
+- 腰: 1DOF (waist_yaw のみ)
+- 腕: 5DOF × 2 = 10 (shoulder×3 + elbow + wrist_roll)
+
+## 学習パイプライン
+1. **Teacher Policy** (Privileged): PPO で特権情報付きの教師ポリシーを学習
+2. **Student Policy** (DAgger蒸留): DAgger + PPO で観測可能な情報のみの生徒ポリシーを蒸留
+3. **ONNX Export**: 学習済みモデルを ONNX にエクスポート
+4. **Sim2Sim**: MuJoCo + Redis でシミュレーション検証
+5. **Sim2Real**: Unitree SDK 経由で実機デプロイ
+
+## 開発環境
+- **OS**: Windows 10/11
+- **シェル**: PowerShell (bash/Linux コマンドは使用不可)
+- **パッケージマネージャ**: `uv` (pip ではなく uv を使用)
+- **Python**: 3.8 (IsaacGym 要件)
+- **GPU**: CUDA 対応 NVIDIA GPU 必須
+- **通信**: Redis (sim2sim / teleop 用)
+
+## 言語
+- コード内コメント: 日本語 OK
+- ユーザーへの応答: 日本語で回答

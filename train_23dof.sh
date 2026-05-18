@@ -10,7 +10,7 @@
 # ステップ:
 # 1. まずデータセット変換スクリプトを実行 (初回のみ)
 # 2. Teacher (privileged) ポリシーを学習
-# 3. Student (future) ポリシーを蒸留学習
+# 3. Student (future) ポリシーを蒸留学習 (DAgger)
 
 set -e
 
@@ -18,10 +18,17 @@ set -e
 EXP_NAME=${1:-"g1_23dof_exp"}
 CUDA_DEVICE=${2:-"cuda:0"}
 
+# proj_name: Teacher学習のログディレクトリ名
+# DAgger config (G1_23DOF_MimicStuFutureCfgDAgger) の teacher_proj_name と一致させる
+TEACHER_PROJ_NAME="g1_23dof_priv_mimic"
+STUDENT_PROJ_NAME="g1_23dof_future"
+
 echo "=========================================="
 echo "TWIST2 23DOF G1 Training"
 echo "Experiment: $EXP_NAME"
 echo "Device: $CUDA_DEVICE"
+echo "Teacher proj: $TEACHER_PROJ_NAME"
+echo "Student proj: $STUDENT_PROJ_NAME"
 echo "=========================================="
 
 cd "$(dirname "$0")"
@@ -57,47 +64,53 @@ fi
 echo ""
 echo "Step 1: Training Teacher (Privileged) Policy"
 echo "============================================="
+echo "  task:      g1_23dof_priv"
+echo "  proj_name: $TEACHER_PROJ_NAME"
+echo "  exptid:    ${EXP_NAME}_teacher"
+echo ""
 
 cd legged_gym/legged_gym/scripts
 
 # Teacher学習
+# train.py は log_pth = LEGGED_GYM_ROOT_DIR/logs/<proj_name>/<exptid> でチェックポイントを保存
 python train.py \
     --task g1_23dof_priv \
-    --run_name "${EXP_NAME}_teacher" \
+    --proj_name "$TEACHER_PROJ_NAME" \
+    --exptid "${EXP_NAME}_teacher" \
     --num_envs 2048 \
     --device "$CUDA_DEVICE" \
-    --max_iterations 25000
+    --max_iterations 5000 \
+    --no_wandb  
 
 echo ""
 echo "Step 2: Training Student (Future) Policy with DAgger"
 echo "====================================================="
+echo "  task:           g1_23dof_future"
+echo "  proj_name:      $STUDENT_PROJ_NAME"
+echo "  exptid:         ${EXP_NAME}_student"
+echo "  teacher_exptid: ${EXP_NAME}_teacher"
+echo ""
 
-# Student蒸留学習
-# Teacher checkpointを自動検出
-TEACHER_CKPT=$(ls -t ../../../logs/g1_23dof_priv/${EXP_NAME}_teacher/model_*.pt 2>/dev/null | head -1)
-
-if [ -z "$TEACHER_CKPT" ]; then
-    echo "Error: Teacher checkpoint not found"
-    exit 1
-fi
-
-echo "Using teacher checkpoint: $TEACHER_CKPT"
-
+# Student蒸留学習 (DAgger)
+# DAggerランナーは teacher_proj_name (config: 'g1_23dof_priv_mimic') と
+# teacher_experiment_name (--teacher_exptid で上書き) から自動でTeacherを探索:
+#   logs/<teacher_proj_name>/<teacher_experiment_name>/model_*.pt
 python train.py \
     --task g1_23dof_future \
-    --run_name "${EXP_NAME}_student" \
+    --proj_name "$STUDENT_PROJ_NAME" \
+    --exptid "${EXP_NAME}_student" \
     --num_envs 2048 \
     --device "$CUDA_DEVICE" \
-    --max_iterations 30000 \
-    --resume_path "$TEACHER_CKPT"
+    --max_iterations 6000 \
+    --teacher_exptid "${EXP_NAME}_teacher" \
+    --no_wandb
 
 echo ""
 echo "Training Complete!"
 echo "==================="
-echo "Teacher checkpoint: logs/g1_23dof_priv/${EXP_NAME}_teacher/"
-echo "Student checkpoint: logs/g1_23dof_future/${EXP_NAME}_student/"
+echo "Teacher checkpoint: logs/$TEACHER_PROJ_NAME/${EXP_NAME}_teacher/"
+echo "Student checkpoint: logs/$STUDENT_PROJ_NAME/${EXP_NAME}_student/"
 echo ""
 echo "To export ONNX model:"
-echo "  python save_onnx.py --task g1_23dof_future --run_name ${EXP_NAME}_student"
-
-
+echo "  cd legged_gym/legged_gym/scripts"
+echo "  python save_onnx.py --task g1_23dof_future --proj_name $STUDENT_PROJ_NAME --exptid ${EXP_NAME}_student"

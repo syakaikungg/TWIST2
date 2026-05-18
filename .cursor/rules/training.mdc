@@ -1,0 +1,123 @@
+---
+description: RL学習ワークフロー。学習スクリプト・パラメータの変更時に参照。
+globs:
+  - legged_gym/legged_gym/scripts/**
+  - legged_gym/legged_gym/envs/g1/**
+  - rsl_rl/rsl_rl/**
+  - train*.sh
+---
+
+# トレーニングワークフロー
+
+## 全体フロー
+
+```
+[モーションデータ準備] → [Teacher学習 (PPO)] → [Student蒸留 (DAgger+PPO)] → [ONNX Export] → [Sim2Sim検証]
+```
+
+## コマンド (PowerShell)
+
+### 1. Teacher Policy 学習
+```powershell
+cd legged_gym\legged_gym\scripts
+
+# 29DOF
+python train.py --task g1_priv_mimic --proj_name g1_priv_mimic --exptid <exp_name> --device cuda:0 --no_wandb
+
+# 23DOF
+python train.py --task g1_23dof_priv --proj_name g1_23dof_priv_mimic --exptid <exp_name>_teacher --num_envs 2048 --device cuda:0 --max_iterations 5000 --no_wandb
+```
+
+### 2. Student Policy 蒸留 (DAgger + PPO)
+```powershell
+# 29DOF
+python train.py --task g1_stu_future --proj_name g1_stu_future --exptid <exp_name> --device cuda:0 --teacher_exptid <teacher_exp_name> --no_wandb
+
+# 23DOF
+python train.py --task g1_23dof_future --proj_name g1_23dof_future --exptid <exp_name>_student --num_envs 2048 --device cuda:0 --max_iterations 6000 --teacher_exptid <exp_name>_teacher --no_wandb
+```
+
+### 3. ONNX エクスポート
+```powershell
+cd legged_gym\legged_gym\scripts
+python save_onnx.py --ckpt_path <absolute_path_to_model.pt>
+```
+
+### 4. Sim2Sim 検証
+```powershell
+# Redis サーバ起動が前提
+cd deploy_real
+
+# 29DOF
+python server_low_level_g1_sim.py --policy ..\assets\ckpts\twist2_1017_20k.onnx
+
+# 23DOF
+python server_low_level_g1_23dof_sim.py --xml ..\assets\g1\g1_sim2sim_23dof.xml --policy ..\assets\ckpts\<policy>.onnx --device cuda --measure_fps
+```
+
+## train.py の主要引数
+
+| 引数 | 説明 | デフォルト |
+|---|---|---|
+| `--task` | タスク名 (レジストリ登録名) | 必須 |
+| `--proj_name` | プロジェクト名 (ログディレクトリ名) | 必須 |
+| `--exptid` | 実験ID | 必須 |
+| `--device` | CUDA デバイス | `cuda:0` |
+| `--num_envs` | 並列環境数 | Config 依存 (4096) |
+| `--max_iterations` | 学習イテレーション数 | Config 依存 |
+| `--teacher_exptid` | Teacher の実験ID (DAgger用) | `None` |
+| `--no_wandb` | W&B ログ無効化 | False |
+| `--debug` | デバッグモード (少数env, headless=False) | False |
+| `--resume` | 学習再開 | False |
+| `--resumeid` | 再開する実験ID | None |
+| `--headless` | ヘッドレスモード | 自動 (train時 True) |
+
+## チェックポイント保存先
+```
+legged_gym/legged_gym/logs/<proj_name>/<exptid>/model_<iteration>.pt
+```
+
+## 学習パラメータ変更のポイント
+
+### 環境設定 (env クラス)
+- `num_envs`: VRAM に応じて調整 (16GB→2048, 24GB→4096)
+- `episode_length_s`: エピソード長 (秒)
+- `history_len`: 観測履歴のステップ数 (デフォルト: 10)
+- `obs_type`: `'priv'` (Teacher) / `'student'` / `'student_future'`
+
+### 報酬設定 (rewards.scales)
+- `tracking_joint_dof`: 関節追跡報酬の重み
+- `tracking_keybody_pos`: キーボディ位置追跡の重み
+- `action_rate`: アクション変化率ペナルティ
+
+### Domain Randomization (domain_rand)
+- `randomize_gravity`: 重力ランダム化
+- `randomize_friction`: 摩擦ランダム化
+- `push_robots`: プッシュ外乱
+- `motor_strength_range`: モーター強度のランダム範囲
+- `action_delay`: アクション遅延
+
+### DAgger 設定
+- `dagger_coef`: DAgger 係数 (Teacher への依存度)
+- `dagger_coef_min`: DAgger 最小係数
+- `dagger_coef_anneal_steps`: アニーリングステップ数
+
+## モーションデータ
+
+### データ形式
+- `.pkl` ファイル (pickle)
+- 各ファイルに root_pos, root_rot, dof_pos, body_pos 等を含む
+
+### データ設定
+- `legged_gym/motion_data_configs/twist2_dataset.yaml`: 29DOF用データセット
+- `legged_gym/motion_data_configs/twist2_23dof_dataset.yaml`: 23DOF用データセット
+
+### 29DOF → 23DOF 変換
+```powershell
+python scripts\convert_29dof_to_23dof.py --yaml legged_gym\motion_data_configs\twist2_dataset.yaml --output_dir motion_data_23dof
+```
+
+## VRAM 使用量目安
+- 4096 envs (29DOF): ~20GB VRAM
+- 2048 envs (23DOF): ~10GB VRAM
+- 1024 envs: ~6GB VRAM

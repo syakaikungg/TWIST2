@@ -1,0 +1,99 @@
+---
+description: コーディング規約とベストプラクティス。Pythonコードの追加・変更時に参照。
+globs:
+  - "**/*.py"
+---
+
+# コーディング規約
+
+## 全般
+
+### 言語
+- ユーザーへの応答: 日本語
+- コード内コメント: 日本語 OK
+- 変数名・関数名: 英語 (既存コードと一貫させる)
+
+### パッケージ管理
+- `pip` ではなく `uv` を使用する
+- `uv pip install <package>` の形式で案内する
+
+### OS 対応
+- **Windows PowerShell** 環境前提
+- `bash` / `sh` / Linux コマンドは使用しない
+- シェルスクリプト (`.sh`) の内容を実行する際は、PowerShell の等価コマンドに変換する
+- パス区切り: コード内は `os.path.join()` を使用、ターミナルでは `\` または `/`
+
+## Python コードスタイル
+
+### 既存コードとの一貫性を優先
+- このプロジェクトは既存の legged_gym / rsl_rl フレームワークを拡張している
+- 新しいタスクや設定を追加する際は、既存のパターンに従う
+- Config クラスは **クラス属性** でパラメータを定義する (dataclass ではない)
+
+### Config クラスの書き方
+```python
+# 良い例: 既存パターンに従う
+class MyNewCfg(G1MimicPrivCfg):
+    class env(G1MimicPrivCfg.env):
+        num_actions = 23
+        obs_type = 'student_future'
+    
+    class rewards(G1MimicPrivCfg.rewards):
+        class scales:
+            tracking_joint_dof = 2.0
+```
+
+### 新しいタスクの追加手順
+1. `legged_gym/legged_gym/envs/g1/` に Config ファイルを作成
+2. 必要に応じて環境クラスを作成 (既存クラスを継承)
+3. `legged_gym/legged_gym/envs/__init__.py` にインポートとレジストリ登録を追加
+
+```python
+# envs/__init__.py に追加
+from .g1.my_new_config import MyNewCfg, MyNewCfgPPO
+task_registry.register("my_new_task", G1MimicFuture, MyNewCfg(), MyNewCfgPPO())
+```
+
+### テンソル操作
+- GPU メモリリーク回避: in-place 操作を優先 (`tensor[:] = value`)
+- `.clone()` の不要な使用を避ける
+- `torch.no_grad()` をポリシー推論時に使用
+
+### 観測次元数の整合性
+新しい観測を追加する場合:
+1. Config の `num_observations` / `n_obs_single` を正しく更新
+2. デプロイ側 (`deploy_real/`) の `total_obs_size` と整合させる
+3. ONNX エクスポートスクリプトの次元数も更新
+
+## ファイル構成の原則
+
+### 変更頻度が高いファイル
+- `g1/*_config.py`: 学習パラメータ調整
+- `deploy_real/server_low_level_*.py`: デプロイ設定
+- `motion_data_configs/*.yaml`: データセット設定
+
+### 慎重に変更すべきファイル
+- `base/humanoid_mimic.py`: ベースロジック (多くのクラスが依存)
+- `rsl_rl/modules/`: ネットワーク構造 (ONNX互換性に影響)
+- `gym_utils/task_registry.py`: タスクレジストリ
+
+## デバッグのヒント
+
+### 学習が動かない場合
+```powershell
+# デバッグモードで起動 (少数env, GUI表示)
+python train.py --task g1_stu_future --proj_name test --exptid debug --device cuda:0 --debug --no_wandb
+```
+
+### 観測次元不一致エラー
+- Config の `num_observations` と実際の `obs_buf` サイズを確認
+- `compute_observations()` メソッドで各要素のサイズを print デバッグ
+
+### CUDA Out of Memory
+- `--num_envs` を減らす (4096 → 2048 → 1024)
+- VRAM 16GB: 2048 envs 推奨
+
+## Git 管理の注意点
+- `logs/` ディレクトリはチェックポイントが大きいため .gitignore に追加推奨
+- `.pkl` モーションデータはバイナリファイルのため LFS 管理推奨
+- `assets/ckpts/*.onnx` は LFS 管理推奨

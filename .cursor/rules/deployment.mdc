@@ -1,0 +1,117 @@
+---
+description: デプロイメントとSim2Sim検証の手順。deploy_real/ のコード変更時に参照。
+globs:
+  - deploy_real/**
+  - sim2sim*.sh
+  - sim2real.sh
+  - gui.py
+---
+
+# デプロイメント & Sim2Sim
+
+## アーキテクチャ概要
+
+```
+[Motion Server (高レベル)] ←→ [Redis] ←→ [Low-Level Controller (ONNX Policy)]
+         ↓                                              ↓
+   モーション再生                                MuJoCo / 実機制御
+   or PICO VR テレオペ
+```
+
+## 通信プロトコル (Redis)
+
+### 29DOF キー
+| Redis Key | 方向 | 内容 |
+|---|---|---|
+| `state_body_unitree_g1` | Controller → Server | ロボット状態 (ang_vel, imu, dof_pos) |
+| `action_body_unitree_g1` | Server → Controller | ミミックObs (mimic obs) |
+| `t_state` | Controller → Server | タイムスタンプ |
+
+### 23DOF キー
+| Redis Key | 方向 | 内容 |
+|---|---|---|
+| `state_body_unitree_g1_23dof` | Controller → Server | 28次元 (ang_vel(3)+imu(2)+dof_pos(23)) |
+| `action_body_unitree_g1_23dof` | Server → Controller | 29次元 (mimic obs) |
+
+## Sim2Sim コマンド (PowerShell)
+
+### 前提: Redis サーバ起動
+```powershell
+# Docker の場合
+docker run -d --name redis -p 6379:6379 redis:latest
+
+# WSL2 の場合
+wsl redis-server --daemonize yes
+```
+
+### モーションサーバ起動 (別ターミナル)
+```powershell
+cd deploy_real
+python server_motion_lib.py
+```
+
+### コントローラ起動
+```powershell
+cd deploy_real
+
+# 29DOF
+python server_low_level_g1_sim.py --policy ..\assets\ckpts\twist2_1017_20k.onnx
+
+# 23DOF
+python server_low_level_g1_23dof_sim.py --xml ..\assets\g1\g1_sim2sim_23dof.xml --policy ..\assets\ckpts\<policy>.onnx --device cuda --measure_fps
+```
+
+## コントローラの構造 (RealTimePolicyController)
+
+### 主要パラメータ
+```python
+# PD制御ゲイン (23DOFの例)
+stiffness = [100,100,100,150,40,40] * 2 + [150] + [40,40,40,40,4.0] * 2  # 脚+腰+腕
+damping    = [2,2,2,4,2,2] * 2 + [4] + [5,5,5,5,0.2] * 2
+
+# ポリシー実行周波数
+policy_frequency = 50  # Hz
+sim_dt = 0.001         # MuJoCo シミュレーションステップ
+sim_decimation = 1 / (policy_frequency * sim_dt)  # = 20
+```
+
+### 観測構築フロー (23DOF)
+```
+1. ロボット状態取得 (qpos, qvel, quat)
+2. proprio obs 構築 (ang_vel*0.25, imu, dof_pos-default, dof_vel*0.05, last_action)
+3. state_body を Redis に送信
+4. Redis から action_body (mimic_obs) を受信
+5. 全観測結合: [mimic_obs + proprio | history×10 | future_obs]
+6. ONNX ポリシー推論
+7. PD制御でトルク計算
+```
+
+### 重要な obs スケール
+```python
+obs_scales.ang_vel = 0.25
+obs_scales.dof_pos = 1.0
+obs_scales.dof_vel = 0.05
+action_scale = 0.5
+```
+
+## ONNX ポリシー推論
+
+```python
+# onnxruntime の使用
+session = ort.InferenceSession(policy_path, providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
+input_name = session.get_inputs()[0].name
+outputs = session.run(None, {input_name: obs_np})
+action = outputs[0]
+```
+
+## MuJoCo XML ファイル
+- 29DOF: `assets/g1/g1_sim2sim.xml`
+- 23DOF: `assets/g1/g1_sim2sim_23dof.xml`
+
+## GUI (gui.py)
+CustomTkinter ベースの統合GUI。以下を一括管理:
+1. Sim2Sim コントローラ起動
+2. 実機コントローラ起動
+3. モーションサーバ起動
+4. テレオペモード切替
+5. データ収集

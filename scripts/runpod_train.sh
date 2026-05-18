@@ -24,9 +24,9 @@ python train.py \
     --task g1_23dof_priv \
     --proj_name g1_23dof \
     --exptid exp1_teacher \
-    --num_envs 4096 \
+    --num_envs 8192 \
     --headless \
-    --max_iterations 25000 \
+    --max_iterations 12500 \
     --no_wandb
 
 echo "Teacher完了: $(date)"
@@ -39,9 +39,9 @@ python train.py \
     --task g1_23dof_future \
     --proj_name g1_23dof \
     --exptid exp1_student \
-    --num_envs 4096 \
+    --num_envs 8192 \
     --headless \
-    --max_iterations 30000 \
+    --max_iterations 15000 \
     --no_wandb \
     --teacher_exptid exp1_teacher
 

@@ -1,0 +1,105 @@
+---
+description: 環境構築手順。uv を使用した Windows 環境でのセットアップ。依存関係のインストール時に参照。
+globs:
+  - setup.py
+  - requirements.txt
+  - pyproject.toml
+  - "*.toml"
+---
+
+# 環境構築 (Windows + uv)
+
+## 重要な制約
+- **パッケージマネージャ**: `uv` を使用 (`pip` は使わない)
+- **OS**: Windows 10/11
+- **シェル**: PowerShell (bash/sh スクリプトは直接実行不可)
+- **Python**: 3.8 (IsaacGym の要件)
+
+## uv での基本操作
+
+### 仮想環境の作成
+```powershell
+uv venv --python 3.8 .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+### パッケージインストール
+```powershell
+# pip install -e . の代わりに
+uv pip install -e .
+
+# pip install <package> の代わりに
+uv pip install <package>
+
+# requirements.txt からのインストール
+uv pip install -r requirements.txt
+```
+
+### TWIST2 の依存パッケージインストール
+```powershell
+# ローカルパッケージ (editable install)
+cd rsl_rl; uv pip install -e .; cd ..
+cd legged_gym; uv pip install -e .; cd ..
+cd pose; uv pip install -e .; cd ..
+
+# 必須パッケージ
+uv pip install "numpy==1.23.0" pydelatin wandb tqdm opencv-python ipdb pyfqmr flask dill gdown hydra-core "imageio[ffmpeg]" mujoco mujoco-python-viewer isaacgym-stubs pytorch-kinematics rich termcolor pyzmq
+
+# Redis 通信
+uv pip install "redis[hiredis]"
+
+# ONNX 推論
+uv pip install onnx onnxruntime-gpu
+
+# GUI
+uv pip install customtkinter
+
+# 音声制御 (オプション)
+uv pip install pyttsx3
+```
+
+### IsaacGym のインストール
+IsaacGym は NVIDIA からダウンロードして手動インストールが必要:
+```powershell
+cd isaacgym\python
+uv pip install -e .
+cd ..\..
+```
+
+## Windows 固有の注意点
+
+### bash スクリプトの代替
+- `.sh` ファイルは PowerShell では実行できない
+- `train.sh` → PowerShell で直接 python コマンドを実行:
+  ```powershell
+  cd legged_gym\legged_gym\scripts
+  python train.py --task g1_stu_future --proj_name g1_stu_future --exptid <name> --device cuda:0
+  ```
+
+### パス区切り
+- Windows: バックスラッシュ `\` またはスラッシュ `/` (Python 内部では `/` が安全)
+- コード内のパスは `os.path.join()` を使用すること
+
+### Redis (Windows)
+Windows には Redis 公式サポートがないため、以下のいずれかを使用:
+1. **WSL2** 内で Redis サーバを起動
+2. **Memurai** (Windows 用 Redis 互換): https://www.memurai.com/
+3. **Docker Desktop** で Redis コンテナを起動:
+   ```powershell
+   docker run -d --name redis -p 6379:6379 redis:latest
+   ```
+
+## PyTorch + CUDA
+```powershell
+# CUDA 11.8 の場合
+uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+
+# CUDA 12.1 の場合
+uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+```
+
+## uv を使う理由
+- `pip` より高速 (Rust 実装)
+- 依存関係解決が優れている
+- 仮想環境管理が簡単
+- lockfile サポート

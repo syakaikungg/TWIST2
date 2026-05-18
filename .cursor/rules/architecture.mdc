@@ -1,0 +1,93 @@
+---
+description: TWIST2のコードアーキテクチャと主要クラスの関係。コード理解・変更時に参照。
+globs:
+  - legged_gym/**
+  - rsl_rl/**
+  - pose/**
+  - deploy_real/**
+---
+
+# コードアーキテクチャ
+
+## 環境クラス階層 (legged_gym/legged_gym/envs/)
+
+```
+LeggedRobot (base/legged_robot.py)
+  └── Humanoid (base/humanoid.py)
+        └── HumanoidChar (base/humanoid_char.py)
+              └── HumanoidMimic (base/humanoid_mimic.py)
+                    ├── G1Mimic (g1/g1_mimic.py)
+                    └── G1MimicDistill (g1/g1_mimic_distill.py)
+                          └── G1MimicFuture (g1/g1_mimic_future.py)
+```
+
+## 設定クラス階層 (Config)
+
+```
+LeggedRobotCfg → HumanoidCharCfg → HumanoidMimicCfg
+  ├── G1MimicCfg (29DOF, PPO学習用)
+  ├── G1MimicPrivCfg (29DOF, Teacher Policy)
+  │     ├── G1MimicStuCfg (29DOF, Student Distill)
+  │     └── G1MimicStuFutureCfg (29DOF, Student Future)
+  └── G1_23DOF_MimicPrivCfg (23DOF, Teacher Policy)
+        └── G1_23DOF_MimicStuFutureCfg (23DOF, Student Future)
+```
+
+## タスクレジストリ (legged_gym/legged_gym/envs/__init__.py)
+
+登録されているタスク:
+| タスク名 | 環境クラス | 設定 | 用途 |
+|---|---|---|---|
+| `g1_mimic` | G1Mimic | G1MimicCfg | 29DOF PPO単体学習 |
+| `g1_priv_mimic` | G1MimicDistill | G1MimicPrivCfg | 29DOF Teacher |
+| `g1_stu_mimic` | G1MimicDistill | G1MimicStuCfg | 29DOF Student (DAgger) |
+| `g1_stu_future` | G1MimicFuture | G1MimicStuFutureCfg | 29DOF Student+Future |
+| `g1_23dof_priv` | G1MimicDistill | G1_23DOF_MimicPrivCfg | 23DOF Teacher |
+| `g1_23dof_future` | G1MimicFuture | G1_23DOF_MimicStuFutureCfg | 23DOF Student+Future |
+
+## RL アルゴリズム (rsl_rl/)
+
+| クラス | 説明 |
+|---|---|
+| `OnPolicyRunnerMimic` | PPO学習ループ (Teacher用) |
+| `OnPolicyDaggerRunner` | DAgger+PPO学習ループ (Student用) |
+| `DAggerRunner` | 純粋DAgger蒸留ランナー |
+| `ActorCriticMimic` | Teacher用 Actor-Critic |
+| `ActorCriticFuture` | Student Future用 Actor-Critic (MoE) |
+| `DAggerActor` | 純粋DAgger Student Actor |
+
+## 観測空間の構造
+
+### Teacher (Privileged) Observation
+```
+priv_obs = [priv_mimic_obs | proprio_obs | priv_info]
+
+priv_mimic_obs: 20ステップ × (21 + num_dof + 3×9) per step
+proprio_obs:    ang_vel(3) + imu(2) + dof_pos(N) + dof_vel(N) + last_action(N)
+priv_info:      base_lin_vel(3) + root_pos(3) + root_rot(4) + key_body_pos(9×3) + ...
+```
+
+### Student Observation
+```
+obs = [mimic_obs | proprio_obs] × (history_len + 1) + future_obs
+
+mimic_obs:    root_vel_xy(2) + root_pos_z(1) + roll_pitch(2) + yaw_ang_vel(1) + dof_pos(N)
+proprio_obs:  ang_vel(3) + imu(2) + dof_pos(N) + dof_vel(N) + last_action(N)
+future_obs:   同 mimic_obs × num_future_steps
+```
+
+## デプロイ構造 (deploy_real/)
+
+- **Redis** でモーションサーバとコントローラ間通信
+  - `state_body_unitree_g1` / `state_body_unitree_g1_23dof`: ロボット状態
+  - `action_body_unitree_g1` / `action_body_unitree_g1_23dof`: ミミックObservation
+- **server_low_level_g1_sim.py**: MuJoCo sim2sim (29DOF)
+- **server_low_level_g1_23dof_sim.py**: MuJoCo sim2sim (23DOF)
+- **server_low_level_g1_real.py**: 実機制御 (Unitree SDK)
+- **server_motion_lib.py**: モーション再生サーバ
+
+## 重要なパス定数
+- `LEGGED_GYM_ROOT_DIR`: `legged_gym/legged_gym/` (legged_gym/__init__.py で定義)
+- `LEGGED_GYM_ENVS_DIR`: `legged_gym/legged_gym/legged_gym/envs/`
+- ログ出力先: `legged_gym/legged_gym/logs/<proj_name>/<exptid>/`
+- モーションデータ設定: `legged_gym/motion_data_configs/*.yaml`
