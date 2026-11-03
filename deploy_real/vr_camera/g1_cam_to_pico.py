@@ -17,9 +17,9 @@ G1 頭カメラ (RealSense D435i RGB) → PICO (XRoboToolkit の XRobot アプ�
 エンコードは Jetson のハードウェアエンコーダー (nvv4l2h264enc) を GStreamer で使うので CPU 負荷は小さい。
 
 映像の元 (--source):
-  v4l2      : /dev/video4 (D435i の RGB, YUYV) を直接開く。Unitree の videohub_pc4 を止めておく必要がある。
+  v4l2      : (既定) /dev/video4 (D435i の RGB, YUYV) を直接開く。Unitree の videohub_pc4 を止めておく必要がある。
   multicast : Unitree の videohub_pc4 が出している H.264 RTP マルチキャスト (既定 230.1.1.1:1720) を
-              受けてデコードし直す。サービスを止めなくてよい。
+              受けてデコードし直す。2026-11-03 の G1 では何も流れておらず使えなかった。
   test      : テスト模様 (videotestsrc)。カメラなしで PICO までの経路を確かめる用。
 
 ホストの python3 (gi / GStreamer 1.16 + NVIDIA プラグイン) で動かす。conda の gmr 環境ではない。
@@ -28,8 +28,7 @@ G1 頭カメラ (RealSense D435i RGB) → PICO (XRoboToolkit の XRobot アプ�
   # ネットワークなしの自己テスト (5 秒エンコードして /tmp に保存)
   python3 g1_cam_to_pico.py --source test --selftest 5 --size 2560x720
   # PICO 待ち受け
-  python3 g1_cam_to_pico.py --source multicast
-  python3 g1_cam_to_pico.py --source v4l2 --device /dev/video4
+  python3 g1_cam_to_pico.py --source v4l2 --device /dev/video4 --listen 192.168.123.164:13579
 """
 
 import argparse
@@ -617,7 +616,7 @@ def parse_size(s):
 def main():
     p = argparse.ArgumentParser(description="G1 カメラ → PICO XRobot アプリ 映像送信")
     p.add_argument("--listen", default="0.0.0.0:13579", help="待ち受け (既定 0.0.0.0:13579)")
-    p.add_argument("--source", choices=["v4l2", "multicast", "test"], default="multicast")
+    p.add_argument("--source", choices=["v4l2", "multicast", "test"], default="v4l2")
     p.add_argument("--device", default="/dev/video4", help="v4l2 のデバイス (D435i RGB = /dev/video4)")
     p.add_argument("--cam-size", default="1280x720", help="カメラ側の解像度 (v4l2/test)")
     p.add_argument("--cam-fps", type=int, default=30)

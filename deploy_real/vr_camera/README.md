@@ -32,8 +32,8 @@ G1 の頭の RealSense D435i (RGB) の映像を、PICO の XRobot アプリ (XRo
 ```bash
 cd ~/nextech/cam_to_pico
 bash cam_to_pico.sh selftest test 5          # ネットワークなしでエンコードだけ試す
-bash cam_to_pico.sh selftest multicast 5     # Unitree の映像を受けられるか試す
-bash cam_to_pico.sh start multicast          # PICO を待つ (サービスは止めない)
+bash cam_to_pico.sh selftest v4l2 5          # 頭のカメラで 5 秒エンコードだけ試す (videohub_pc4 を止めてから)
+bash cam_to_pico.sh start v4l2 --listen 192.168.123.164:13579   # PICO を待つ
 bash cam_to_pico.sh status
 bash cam_to_pico.sh stop
 ```
@@ -50,8 +50,8 @@ bash cam_to_pico.sh stop
 
 | `--source` | 内容 | 注意 |
 |---|---|---|
-| `multicast` (既定) | Unitree の `videohub_pc4` が出している H.264 RTP (230.1.1.1:1720) を受けてデコードし直す | サービスを止めなくてよい。解像度・画質は Unitree 側の設定しだい |
-| `v4l2` | `/dev/video4` (D435i RGB, YUYV 1280x720 30fps) を直接開く | `videohub_pc4` が `/dev/video4` を使っているので、先に止める必要がある |
+| `multicast` | Unitree の `videohub_pc4` が出している H.264 RTP (230.1.1.1:1720) を受けてデコードし直す | 2026-11-03 の G1 では 230.1.1.1:1720 に何も流れておらず使えなかった |
+| `v4l2` (既定) | `/dev/video4` (D435i RGB, YUYV 1280x720 30fps) を直接開く | `videohub_pc4` が `/dev/video4` を使っているので、先に止める必要がある |
 | `test` | テスト模様 | カメラなしで PICO までの経路確認用 |
 
 `v4l2` を使うときの `videohub_pc4` の停止 (2026-02 の `scripts/start_vr_camera.sh` と同じ方法。システムのサービスなので本人の確認後に):
@@ -60,7 +60,15 @@ bash cam_to_pico.sh stop
 /unitree/sbin/mscli stopservice video_hub_pc4
 ```
 
-G1 を再起動すると元に戻る (enable:1 のため)。
+止めると `mscli listservice` で `status:1 enable:0` になり、G1 を再起動しても自動では戻らない可能性がある
+(2026-11-03 確認)。元に戻すとき:
+
+```bash
+/unitree/sbin/mscli startservice video_hub_pc4
+/unitree/sbin/mscli listservice   # video_hub_pc4 が status:0 enable:1 に戻ったか確認
+```
+
+sudo は不要 (unitree ユーザーで実行できた)。`/dev/video4` も unitree ユーザーで開ける。
 
 ## 腕テレオペと同時に使うとき
 

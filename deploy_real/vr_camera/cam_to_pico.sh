@@ -9,8 +9,8 @@
 #   bash cam_to_pico.sh selftest [multicast|v4l2|test] [秒数] [追加引数...]
 #
 # 映像の元:
-#   multicast (既定) : Unitree の videohub_pc4 が出している H.264 をそのまま使う。サービスは止めない。
-#   v4l2             : /dev/video4 を直接開く。先に videohub_pc4 を止める必要がある (README 参照)。
+#   v4l2 (既定)      : /dev/video4 を直接開く。先に videohub_pc4 を止める必要がある (README 参照)。
+#   multicast        : videohub_pc4 の H.264 マルチキャストを受ける (2026-11 の G1 では流れておらず使えない)。
 #   test             : テスト模様。カメラなしで PICO までの経路を確かめる。
 #
 # PICO 側: XRobot アプリ → Remote Vision → カメラ (ZEDMINI か PICO4U) → Listen → 192.168.123.164 → Confirm
@@ -29,7 +29,7 @@ cmd="${1:-status}"
 
 case "$cmd" in
   start)
-    src="${1:-multicast}"
+    src="${1:-v4l2}"
     [ $# -gt 0 ] && shift
     if pgrep -f "$PAT" > /dev/null; then
       echo "すでに動いています:"
