@@ -19,6 +19,7 @@ gmr 環境の python (mujoco, redis, numpy あり) で動かす:
 """
 
 import argparse
+import importlib.util
 import json
 import math
 import os
@@ -66,7 +67,23 @@ def _absolutize(root, base_dir):
             inc.set("file", os.path.normpath(os.path.join(base_dir, f)))
 
 
-def build_model(xml_path, body, pos, pitch, fovy, add_floor, hide_meshes=("head_link", "logo_link")):
+def load_drill_module(extra_dir=""):
+    """腕シムの右手のドリル (deploy_real/arm_ik/sim_drill.py) を探して読み込む。無ければ None"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    dirs = [extra_dir] if extra_dir else []
+    dirs += [here, os.path.join(here, "..", "arm_ik"), os.path.expanduser("~/nextech/arm_ik")]
+    for d in dirs:
+        path = os.path.normpath(os.path.join(os.path.expanduser(d), "sim_drill.py"))
+        if os.path.isfile(path):
+            spec = importlib.util.spec_from_file_location("sim_drill", path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod, path
+    return None, ", ".join(os.path.normpath(os.path.expanduser(d)) for d in dirs)
+
+
+def build_model(xml_path, body, pos, pitch, fovy, add_floor, hide_meshes=("head_link", "logo_link"),
+                drill_mod=None):
     xml_path = os.path.abspath(os.path.expanduser(xml_path))
     tree = ET.parse(xml_path)
     root = tree.getroot()
@@ -122,7 +139,15 @@ def build_model(xml_path, body, pos, pitch, fovy, add_floor, hide_meshes=("head_
     q.set("shadowsize", "1024")
 
     xml = ET.tostring(root, encoding="unicode")
-    return mujoco.MjModel.from_xml_string(xml)
+    if drill_mod is not None:
+        # 腕シム (arm_sim.py) と同じく、右手に見た目だけのドリル (重さ・当たり判定なし) を足す
+        try:
+            spec = mujoco.MjSpec.from_string(xml)
+            drill_mod.add_drill(spec)
+            return spec.compile(), True
+        except Exception as e:
+            log("注意: ドリルを足せませんでした (%s)。ドリルなしで続けます" % e)
+    return mujoco.MjModel.from_xml_string(xml), False
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +168,7 @@ class QposReader(object):
                 self.name_adr[n] = model.jnt_qposadr[j]
         self.warned = set()
         self.last_ok = 0.0
+        self.drill = None   # sim_qpos の "drill" ({"on", "angle", "rps"})。無ければ None (止まった表示)
 
     def _warn(self, key, msg):
         if key not in self.warned:
@@ -165,6 +191,8 @@ class QposReader(object):
         except Exception:
             obj = None
         if isinstance(obj, dict):
+            d = obj.get("drill")
+            self.drill = d if isinstance(d, dict) else None
             for k in ("joints", "qpos", "q", "data"):
                 if k in obj:
                     obj = obj[k]
@@ -209,8 +237,18 @@ class QposReader(object):
 class HeadCam(object):
     def __init__(self, args):
         self.args = args
-        self.model = build_model(args.model, args.body, D435_POS if not args.cam_pos else tuple(args.cam_pos),
-                                 args.cam_pitch, args.fovy, not args.no_floor)
+        drill_mod = None
+        if not args.no_drill:
+            drill_mod, where = load_drill_module(args.drill_dir)
+            if drill_mod is None:
+                log("ドリル: sim_drill.py が見つからないので表示しません (探した場所: %s)" % where)
+        self.model, has_drill = build_model(
+            args.model, args.body, D435_POS if not args.cam_pos else tuple(args.cam_pos),
+            args.cam_pitch, args.fovy, not args.no_floor, drill_mod=drill_mod)
+        self.drill_view = None
+        if has_drill:
+            self.drill_view = drill_mod.DrillView(self.model)
+            log("ドリル: 右手に表示 (%s)。sim_qpos の drill で回る" % where)
         self.data = mujoco.MjData(self.model)
         # 腕シム (arm_sim.py) は keyframe・freejoint・脚の関節を消しているので、骨盤は XML の pos (0 0 0.793)、
         # 脚は角度 0 のまま。ここでも keyframe ("home" は骨盤 1.0 m・膝曲げ) は使わず qpos0 から始める。
@@ -235,6 +273,8 @@ class HeadCam(object):
     def frame(self):
         if self.reader:
             self.reader.read(self.data.qpos)
+        if self.drill_view is not None:
+            self.drill_view.apply(self.model, self.reader.drill if self.reader else None)
         mujoco.mj_kinematics(self.model, self.data)
         self.renderer.update_scene(self.data, camera="head_d435", scene_option=self.opt)
         rgb = self.renderer.render()
@@ -297,6 +337,9 @@ def main():
     p.add_argument("--fovy", type=float, default=42.0, help="縦の画角 (度)")
     p.add_argument("--keyframe", type=int, default=-1, help="初期姿勢に使う keyframe 番号 (既定 -1 = 使わない。腕シムと同じ)")
     p.add_argument("--no-floor", action="store_true")
+    p.add_argument("--no-drill", action="store_true", help="右手のドリル (sim_drill.py) を描かない")
+    p.add_argument("--drill-dir", default="",
+                   help="sim_drill.py の場所 (既定はこのフォルダ, ../arm_ik, ~/nextech/arm_ik の順に探す)")
     p.add_argument("--shadows", action="store_true", help="影を描く (既定は切る)")
     p.add_argument("--width", type=int, default=1280)
     p.add_argument("--height", type=int, default=720)

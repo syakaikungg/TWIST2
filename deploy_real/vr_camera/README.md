@@ -79,6 +79,8 @@ sudo は不要 (unitree ユーザーで実行できた)。`/dev/video4` も unit
 
 - カメラは Unitree の URDF の `d435_joint` と同じ位置・向き (torso_link から (0.0576, 0.0175, 0.4299)、下向き 0.831 rad)、縦の画角 42°。
 - 頭の殻のメッシュ (`head_link` / `logo_link`) は視界をふさぐので描かない。影と反射も切って軽くしている。
+- 右手のドリル (腕シムと同じ `deploy_real/arm_ik/sim_drill.py`、見た目だけ) も描き、`sim_qpos` の `drill` (`on` / `angle`) で回す。
+  `sim_drill.py` はこのフォルダ → `../arm_ik` → `~/nextech/arm_ik` の順に探し (`--drill-dir` で指定も可)、見つからなければドリルなしで描く。`--no-drill` で消せる。
 - 描画は gmr 環境の python + MuJoCo の EGL (GPU)。エンコードは実機カメラと同じハードウェア H.264。
 
 ```bash
