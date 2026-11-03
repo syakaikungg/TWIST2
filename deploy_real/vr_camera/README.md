@@ -1,0 +1,78 @@
+# G1 頭カメラ → PICO 映像送信
+
+G1 の頭の RealSense D435i (RGB) の映像を、PICO の XRobot アプリ (XRoboToolkit) の「Remote Vision」に送り、
+映像を見ながらテレオペできるようにするためのもの。G1 内蔵PC (Orin NX, 192.168.123.164) 上で動かす。
+
+2026-02 に作った `persistent_vr_server.py` (`scripts/start_vr_camera.sh` から起動していたもの) は
+リポジトリに入っておらず G1 からも消えていたため、2026-11 に作り直した。
+
+## ファイル
+
+| ファイル | 内容 |
+|---|---|
+| `g1_cam_to_pico.py` | 本体。TCP 13579 で PICO を待ち、要求に合わせて H.264 を送る |
+| `cam_to_pico.sh` | G1 上での起動・停止・状態・自己テスト |
+| `fake_pico_client.py` | PICO の代わりに要求を送って受信を数えるテスト用クライアント |
+
+## 仕組み
+
+1. `g1_cam_to_pico.py` が TCP 13579 で待つ。
+2. PICO の XRobot アプリで Remote Vision → カメラ (ZEDMINI か PICO4U) → Listen → `192.168.123.164` → Confirm。
+   アプリが `OPEN_CAMERA` (幅・高さ・fps・ビットレート・送り先 IP/ポート) を送ってくる。
+3. G1 から PICO の指定ポートに TCP 接続し、H.264 (Annex-B) を 1 フレームずつ `[4byte 長さ][データ]` で送る。
+   幅 2000 以上 (ZEDMINI=2560x720 など) の要求は左右並びのステレオなので、同じ映像を左右に並べる。
+4. エンコードは Jetson のハードウェアエンコーダー (`nvv4l2h264enc`)、縮小・切り取りは `nvvidconv`。
+
+プロトコルは `deploy_real/data_utils/webcam_to_vr.py` と同じ。
+
+## 使い方 (G1 上)
+
+ホストの `/usr/bin/python3` を使う (gi と NVIDIA の GStreamer プラグインがあるため)。conda の gmr 環境では動かない。
+
+```bash
+cd ~/nextech/cam_to_pico
+bash cam_to_pico.sh selftest test 5          # ネットワークなしでエンコードだけ試す
+bash cam_to_pico.sh selftest multicast 5     # Unitree の映像を受けられるか試す
+bash cam_to_pico.sh start multicast          # PICO を待つ (サービスは止めない)
+bash cam_to_pico.sh status
+bash cam_to_pico.sh stop
+```
+
+PICO なしで G1 上だけで試す:
+
+```bash
+bash cam_to_pico.sh start test
+/usr/bin/python3 fake_pico_client.py --server 127.0.0.1:13579 --size 2560x720 --seconds 5
+bash cam_to_pico.sh stop
+```
+
+## 映像の元
+
+| `--source` | 内容 | 注意 |
+|---|---|---|
+| `multicast` (既定) | Unitree の `videohub_pc4` が出している H.264 RTP (230.1.1.1:1720) を受けてデコードし直す | サービスを止めなくてよい。解像度・画質は Unitree 側の設定しだい |
+| `v4l2` | `/dev/video4` (D435i RGB, YUYV 1280x720 30fps) を直接開く | `videohub_pc4` が `/dev/video4` を使っているので、先に止める必要がある |
+| `test` | テスト模様 | カメラなしで PICO までの経路確認用 |
+
+`v4l2` を使うときの `videohub_pc4` の停止 (2026-02 の `scripts/start_vr_camera.sh` と同じ方法。システムのサービスなので本人の確認後に):
+
+```bash
+/unitree/sbin/mscli stopservice video_hub_pc4
+```
+
+G1 を再起動すると元に戻る (enable:1 のため)。
+
+## 腕テレオペと同時に使うとき
+
+- 腕のブリッジは `rt/lowstate` が 0.2 秒、Redis の `arm_ik_q` が 0.3 秒古くなると非常停止する。
+  映像を起動する前後でブリッジのループ時間を確認する。
+- 実機テスト (`--send`) 中に PICO アプリの画面切替はしない。切替でコントローラーの送信が途切れないかは要確認。
+- ポートは 13579 だけ使う (PC Service の 63901/34074/60061、Redis の 6379 とは重ならない)。
+
+## よく使うオプション
+
+- `--bitrate 4000000` : PICO の要求値を無視してビットレートを固定 (bps)
+- `--aspect stretch` : 片目の縦横比に合わせて切り取らず引き伸ばす (既定は中央を切り取り)
+- `--mono` : 幅が大きくても左右に並べない
+- `--no-hevc` : PICO が H.265 を要求しても H.264 で送る
+- `--encoder x264` : Jetson 以外でのテスト用 (ソフトエンコード)
