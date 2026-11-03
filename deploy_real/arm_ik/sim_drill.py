@@ -12,8 +12,9 @@ arm_sim.py adds it to the right hand, spins it while IK's Redis `drill_cmd` says
 
 The shape is made up (the real attachment is not finished): a clamp over the fingers, a motor body, and in
 front of it the chuck and bit, along the hand's forward axis (x of right_wrist_yaw_link). The chuck has a
-yellow stripe and the bit a flat blade, so the turning is easy to see; the ring on the motor turns green
-while ON. Shown at 3 rev/s (not the real speed) so that 30-50 fps video does not alias it.
+yellow stripe and the bit a flat blade, so the turning is easy to see. The ring on the motor and the lamp
+on the clamp's wrist side (what the head camera sees) turn green while ON. Shown at 3 rev/s (not the real
+speed) so that 30-50 fps video does not alias it.
 """
 import math
 
@@ -22,7 +23,7 @@ import numpy as np
 
 PARENT = "right_wrist_yaw_link"
 BIT_BODY = "drill_bit"
-RING_GEOM = "drill_ring"
+LAMP_GEOMS = ("drill_ring", "drill_lamp")   # green while ON
 RING_OFF = [0.25, 0.25, 0.25, 1.0]
 RING_ON = [0.1, 0.95, 0.2, 1.0]
 _Z_TO_X = [math.cos(math.pi / 4), 0.0, math.sin(math.pi / 4), 0.0]   # cylinders run along local z
@@ -46,7 +47,8 @@ def add_drill(spec, parent=PARENT, prefix="drill"):
     body = wrist.add_body(name=f"{prefix}_body", pos=[0.0, 0.012, 0.010])
     _geom(body, f"{prefix}_clamp", box, [0.040, 0.036, 0.056], [0.140, 0.0, 0.0], [0.22, 0.22, 0.25, 1.0])
     _geom(body, f"{prefix}_motor", cyl, [0.030, 0.040, 0], [0.220, 0.0, 0.0], [0.95, 0.55, 0.05, 1.0], True)
-    _geom(body, RING_GEOM, cyl, [0.0315, 0.007, 0], [0.205, 0.0, 0.0], RING_OFF, True)
+    _geom(body, "drill_lamp", box, [0.0015, 0.034, 0.054], [0.0985, 0.0, 0.0], RING_OFF)   # wrist-side face
+    _geom(body, "drill_ring", cyl, [0.0315, 0.007, 0], [0.205, 0.0, 0.0], RING_OFF, True)
     bit = body.add_body(name=BIT_BODY, pos=[0.260, 0.0, 0.0])        # turns about its x axis
     _geom(bit, f"{prefix}_chuck", cyl, [0.017, 0.018, 0], [0.018, 0.0, 0.0], [0.08, 0.08, 0.08, 1.0], True)
     _geom(bit, f"{prefix}_stripe", box, [0.018, 0.005, 0.004], [0.018, 0.0, 0.016], [1.0, 0.85, 0.0, 1.0])
@@ -57,12 +59,12 @@ def add_drill(spec, parent=PARENT, prefix="drill"):
 
 
 class DrillView:
-    """Turns the bit and colours the ring of a model built with add_drill()."""
+    """Turns the bit and colours the ring and lamp of a model built with add_drill()."""
 
     def __init__(self, m):
         self.bit = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, BIT_BODY)
-        self.ring = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, RING_GEOM)
-        self.ok = self.bit >= 0 and self.ring >= 0
+        self.lamps = [g for g in (mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, n) for n in LAMP_GEOMS) if g >= 0]
+        self.ok = self.bit >= 0
         self.q0 = m.body_quat[self.bit].copy() if self.ok else None
 
     def apply(self, m, state):
@@ -74,7 +76,8 @@ class DrillView:
         q = np.zeros(4)
         mujoco.mju_mulQuat(q, self.q0, np.array([math.cos(a / 2), math.sin(a / 2), 0.0, 0.0]))
         m.body_quat[self.bit] = q
-        m.geom_rgba[self.ring] = RING_ON if state.get("on") else RING_OFF
+        for g in self.lamps:
+            m.geom_rgba[g] = RING_ON if state.get("on") else RING_OFF
 
 
 class DrillSpin:
