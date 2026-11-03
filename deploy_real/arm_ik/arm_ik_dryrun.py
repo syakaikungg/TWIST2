@@ -1,0 +1,673 @@
+#!/usr/bin/env python3
+"""Arm IK for the G1 from PICO controllers. Sends NOTHING to the robot (no DDS).
+
+Reads headset/controller poses from xrobotoolkit_sdk, solves arm-only IK with mink on GMR's G1 29DOF
+model, and writes the 14 arm joint angles, the drill on/off value and the teleop state to the local Redis.
+
+Operator controls (one person, headset on):
+  right A        enable / pause teleop. Enabling takes the arms' measured angles (Redis `arm_state`, written
+                 by the bridge from rt/lowstate) as the start pose, so nothing moves until the grip is held.
+                 Pause: the bridge hands the arms back to the built-in controller.
+  right grip     dead-man: the arms follow the hands only while it is held; release = arms stop where they are
+  right trigger  drill ON while held (only while enabled and the grip is held)
+  right B        glide back to the start pose measured at enable, then pause
+  left X or Y    EMERGENCY STOP (latched until this program is restarted from the PC)
+Also an emergency stop: PICO data missing for 0.3 s while enabled, `teleop_stop` set in Redis (stop.sh),
+Ctrl+C / SIGTERM.
+
+  python arm_ik_dryrun.py --arms both
+  python arm_ik_dryrun.py --selftest [--scenario deadman|estop_x|pico_stale|none] [--selftest-redis]
+"""
+import argparse
+import csv
+import gc
+import json
+import math
+import signal
+import time
+from pathlib import Path
+
+import mink
+import mujoco
+import numpy as np
+from loop_rate_limiters import RateLimiter
+from scipy.spatial.transform import Rotation as R
+
+from general_motion_retargeting import ROBOT_XML_DICT
+
+# Unitree G1 motor order: left arm 15-21, right arm 22-28.
+ARM_JOINTS = {
+    "left": [
+        "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint",
+        "left_elbow_joint", "left_wrist_roll_joint", "left_wrist_pitch_joint", "left_wrist_yaw_joint",
+    ],
+    "right": [
+        "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint",
+        "right_elbow_joint", "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint",
+    ],
+}
+ALL_NAMES = ARM_JOINTS["left"] + ARM_JOINTS["right"]
+# Default arm pose used by TWIST2 (deploy_real/data_utils/params.py): arms out, elbows bent forward.
+DEFAULT_Q = {
+    "left": [0.0, 0.4, 0.0, 1.2, 0.0, 0.0, 0.0],
+    "right": [0.0, -0.4, 0.0, 1.2, 0.0, 0.0, 0.0],
+}
+HAND_BODY = {"left": "left_rubber_hand", "right": "right_rubber_hand"}
+STALE_S = 0.3
+# Collision avoidance in the IK: arm links vs the body, and forearm vs forearm.
+ARM_LINKS = ["shoulder_yaw_link", "elbow_link", "wrist_roll_link", "wrist_pitch_link", "wrist_yaw_link"]
+FOREARM_LINKS = ["elbow_link", "wrist_roll_link", "wrist_pitch_link", "wrist_yaw_link"]
+BODY_LINKS = ["pelvis", "torso_link"] + [f"{s}_{p}" for s in ("left", "right")
+                                         for p in ("hip_pitch_link", "hip_roll_link", "hip_yaw_link", "knee_link")]
+
+# PICO / OpenXR axes (x right, y up, z back) -> robot axes (x forward, y left, z up).
+M = np.array([[0.0, 0.0, -1.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+
+
+def rot_z(yaw):
+    c, s = math.cos(yaw), math.sin(yaw)
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+
+def pose7(p):
+    """[x, y, z, qx, qy, qz, qw] -> (pos, rotmat), or None if the quaternion is empty."""
+    p = np.asarray(p, dtype=float)
+    if p.shape[0] < 7 or np.linalg.norm(p[3:7]) < 0.5:
+        return None
+    return p[:3].copy(), R.from_quat(p[3:7]).as_matrix()
+
+
+def head_yaw(R_head):
+    """Yaw of the headset's forward direction, in robot axes."""
+    fwd = (M @ R_head @ M.T) @ np.array([1.0, 0.0, 0.0])
+    return math.atan2(fwd[1], fwd[0])
+
+
+def build_arm_model(sides):
+    """GMR's G1 29DOF model with only the chosen arms' joints left free (base, legs, waist welded)."""
+    keep = {j for s in sides for j in ARM_JOINTS[s]}
+    spec = mujoco.MjSpec.from_file(str(ROBOT_XML_DICT["unitree_g1"]))
+    for a in list(spec.actuators):
+        if a.target not in keep:
+            spec.delete(a)
+    for s in list(spec.sensors):
+        if s.objtype == mujoco.mjtObj.mjOBJ_JOINT and s.objname not in keep:
+            spec.delete(s)
+    for j in list(spec.joints):
+        if j.name not in keep:
+            spec.delete(j)
+    return spec.compile()
+
+
+class SdkSource:
+    """Live PICO data through xrobotoolkit_sdk."""
+
+    def __init__(self):
+        import xrobotoolkit_sdk as xr
+        self.xr = xr
+        xr.init()
+
+    def read(self, t):
+        xr = self.xr
+        return {
+            "head": pose7(xr.get_headset_pose()),
+            "left": pose7(xr.get_left_controller_pose()),
+            "right": pose7(xr.get_right_controller_pose()),
+            "trigger": float(xr.get_right_trigger()),
+            "grip": float(xr.get_right_grip()),
+            "A": bool(xr.get_A_button()), "B": bool(xr.get_B_button()),
+            "X": bool(xr.get_X_button()), "Y": bool(xr.get_Y_button()),
+            "stamp": int(xr.get_time_stamp_ns()),
+            # Logged only (to find which input goes with a stop or a data gap).
+            "lgrip": float(xr.get_left_grip()), "ltrig": float(xr.get_left_trigger()),
+            "lmenu": bool(xr.get_left_menu_button()), "rmenu": bool(xr.get_right_menu_button()),
+            "lclick": bool(xr.get_left_axis_click()), "rclick": bool(xr.get_right_axis_click()),
+            "laxis": [float(v) for v in xr.get_left_axis()], "raxis": [float(v) for v in xr.get_right_axis()],
+        }
+
+    def close(self):
+        self.xr.close()
+
+
+class SyntheticSource:
+    """Scripted inputs for checking the IK and the stops without a PICO.
+
+    scenario "none": A at 1 s, grip held 1-10 s; 2 s bumps on the right controller (out and back):
+      forward 0.15 m, up 0.15 m, left 0.15 m, twist +45 deg; trigger 9-10 s; B at 12 s; A at 14 s.
+    scenario "deadman": A at 1 s; forward ramp 1.5-6 s; grip held 1.5-3.5 s and 5-7 s; trigger 3.8-4.6 s
+      (grip released -> drill must stay OFF) and 5.5-6.3 s (grip held -> drill ON).
+    scenario "estop_x": A at 1 s, grip from 1.5 s, trigger 3-6 s, left X at 4 s.
+    scenario "pico_stale": A at 1 s, grip from 1.5 s, PICO stream freezes at 4 s.
+    scenario "hold": A at 1 s, no grip until 4 s (arms must not move), grip 4-6 s with a forward drift,
+      B at 7 s (glide back to the start pose, then pause).
+    scenario "sim_suite": A at 1 s, grip 4.5-19.5 s (after the bridge's 3 s weight ramp); right-hand bumps
+      forward/up/left 0.15 m and twist 45 deg (2 s each, from 5 s), both hands toward each other 0.2 m
+      (13-16 s), right hand back+left toward the torso (16-19 s); B at 20 s.
+    """
+
+    SUITE = [("forward", 5.0, 7.0), ("up", 7.0, 9.0), ("left", 9.0, 11.0), ("twist", 11.0, 13.0),
+             ("together", 13.0, 16.0), ("to_torso", 16.0, 19.0)]
+
+    PHASES = [("forward", 1.0, 3.0), ("up", 3.0, 5.0), ("left", 5.0, 7.0), ("twist", 7.0, 9.0)]
+
+    def __init__(self, scenario):
+        self.scenario = scenario
+
+    def read(self, t):
+        sc = self.scenario
+        head = (np.array([0.0, 1.6, 0.0]), np.eye(3))
+        base = np.array([0.25, 1.1, -0.35])            # right hand, in front of the chest (PICO axes)
+        off, rot = np.zeros(3), np.eye(3)
+        d = {"trigger": 0.0, "grip": 0.0, "A": 1.0 <= t < 1.1, "B": False, "X": False, "Y": False}
+        stamp = int(t * 1e9)
+        loff = np.zeros(3)
+        if sc == "sim_suite":
+            for name, t0, t1 in self.SUITE:
+                if t0 <= t < t1:
+                    a = math.sin(math.pi * (t - t0) / (t1 - t0))
+                    if name == "forward":
+                        off = np.array([0.0, 0.0, -0.15 * a])
+                    elif name == "up":
+                        off = np.array([0.0, 0.15 * a, 0.0])
+                    elif name == "left":
+                        off = np.array([-0.15 * a, 0.0, 0.0])
+                    elif name == "twist":
+                        rot = R.from_rotvec([0.0, 0.0, -math.radians(45) * a]).as_matrix()
+                    elif name == "together":            # hands toward the midline, in front of the chest
+                        off = np.array([-0.20 * a, 0.0, 0.0])
+                        loff = np.array([0.20 * a, 0.0, 0.0])
+                    else:                                # right hand back toward the body and across
+                        off = np.array([-0.15 * a, 0.0, 0.25 * a])
+            d["grip"] = 1.0 if 4.5 <= t < 19.5 else 0.0
+            d["B"] = 20.0 <= t < 20.1
+        elif sc == "reach_fwd":   # both hands from the chest to fully forward at shoulder height, hold, back
+            a = float(np.clip((t - 5.0) / 2.0, 0, 1)) - float(np.clip((t - 10.0) / 2.0, 0, 1))
+            chest_r, far_r = np.array([0.25, 1.1, -0.35]), np.array([0.19, 1.35, -0.55])
+            off = a * (far_r - chest_r)
+            loff = a * (np.array([-0.19, 1.35, -0.55]) - np.array([-0.25, 1.1, -0.35]))
+            d["grip"] = 1.0 if 4.5 <= t < 13.5 else 0.0
+            d["B"] = 14.0 <= t < 14.1
+        elif sc == "none":
+            for name, t0, t1 in self.PHASES:
+                if t0 <= t < t1:
+                    a = math.sin(math.pi * (t - t0) / (t1 - t0))
+                    if name == "forward":
+                        off = np.array([0.0, 0.0, -0.15 * a])   # PICO -z = forward
+                    elif name == "up":
+                        off = np.array([0.0, 0.15 * a, 0.0])    # PICO +y = up
+                    elif name == "left":
+                        off = np.array([-0.15 * a, 0.0, 0.0])   # PICO -x = left
+                    else:
+                        rot = R.from_rotvec([0.0, 0.0, -math.radians(45) * a]).as_matrix()
+            d["grip"] = 1.0 if 1.0 <= t < 10.0 else 0.0
+            d["trigger"] = 1.0 if 9.0 <= t < 10.0 else 0.0
+            d["A"] = (1.0 <= t < 1.1) or (14.0 <= t < 14.1)
+            d["B"] = 12.0 <= t < 12.1
+        else:
+            off = np.array([0.0, 0.0, -0.05 * max(0.0, min(t, 6.0) - 1.5)])   # slow forward drift
+            if sc == "deadman":
+                d["grip"] = 1.0 if (1.5 <= t < 3.5 or 5.0 <= t < 7.0) else 0.0
+                d["trigger"] = 1.0 if (3.8 <= t < 4.6 or 5.5 <= t < 6.3) else 0.0
+            elif sc == "estop_x":
+                d["grip"] = 1.0 if t >= 1.5 else 0.0
+                d["trigger"] = 1.0 if 3.0 <= t < 6.0 else 0.0
+                d["X"] = 4.0 <= t < 4.1
+            elif sc == "pico_stale":
+                d["grip"] = 1.0 if t >= 1.5 else 0.0
+                if t >= 4.0:
+                    stamp = int(4.0 * 1e9)
+            elif sc == "hold":
+                off = np.array([0.0, 0.0, -0.05 * max(0.0, min(t, 6.0) - 4.0)])
+                d["grip"] = 1.0 if 4.0 <= t < 6.0 else 0.0
+                d["B"] = 7.0 <= t < 7.1
+        d.update({"head": head, "left": (np.array([-0.25, 1.1, -0.35]) + loff, np.eye(3)),
+                  "right": (base + off, rot), "stamp": stamp})
+        return d
+
+    def close(self):
+        pass
+
+
+class StopRequested(Exception):
+    pass
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--arms", choices=["right", "both"], default="both")
+    ap.add_argument("--rate", type=float, default=50.0, help="loop rate [Hz]")
+    ap.add_argument("--duration", type=float, default=0.0, help="seconds to run (0 = until Ctrl+C)")
+    ap.add_argument("--mode", choices=["absolute", "relative"], default="absolute",
+                    help="absolute: operator hand relative to the operator's (estimated) shoulder -> robot hand "
+                         "relative to the robot's shoulder; relative: clutch, hand moves by the controller delta")
+    ap.add_argument("--human-arm", type=float, default=0.60, help="operator shoulder-to-controller reach [m] (absolute)")
+    ap.add_argument("--abs-scale", type=float, default=0.0, help="absolute position scale (0 = robot reach / --human-arm)")
+    ap.add_argument("--human-shoulder-width", type=float, default=0.38, help="operator shoulder width [m] (absolute)")
+    ap.add_argument("--head-down", type=float, default=0.25, help="headset to shoulder line, down [m] (absolute)")
+    ap.add_argument("--head-back", type=float, default=0.10, help="headset to shoulder line, back [m] (absolute)")
+    ap.add_argument("--orient-cost", type=float, default=0.3, help="weight of the hand orientation in the IK")
+    ap.add_argument("--orient-pitch", type=float, default=0.0, help="extra pitch of the hand vs the controller [deg]")
+    ap.add_argument("--lm-damping", type=float, default=1.0,
+                    help="IK hand-task damping (larger = smoother but slower to catch up)")
+    ap.add_argument("--reach-frac", type=float, default=0.95, help="absolute mode: hand target within this x arm reach")
+    ap.add_argument("--max-forward", type=float, default=0.0,
+                    help="absolute mode: hand target at most this far in front of the shoulder [m] (0 = no limit)")
+    ap.add_argument("--hand-speed", type=float, default=0.3, help="absolute mode: max hand target speed [m/s]")
+    ap.add_argument("--hand-turn", type=float, default=1.5, help="absolute mode: max hand target turn rate [rad/s]")
+    ap.add_argument("--scale", type=float, default=1.0, help="relative mode: controller -> hand position scale")
+    ap.add_argument("--rot-scale", type=float, default=0.7, help="relative mode: controller -> hand rotation scale")
+    ap.add_argument("--max-vel", type=float, default=3.0, help="joint velocity limit [rad/s]")
+    ap.add_argument("--max-reach", type=float, default=0.4, help="max hand offset from the grip point [m]")
+    ap.add_argument("--posture-cost", type=float, default=0.05)
+    ap.add_argument("--collision-margin", type=float, default=0.04,
+                    help="keep arm links this far from the body / other forearm [m] (0 = off)")
+    ap.add_argument("--redis-host", default="127.0.0.1")
+    ap.add_argument("--no-redis", action="store_true")
+    ap.add_argument("--selftest", action="store_true", help="synthetic inputs, no PICO, no Redis")
+    ap.add_argument("--scenario", default="none",
+                    choices=["none", "deadman", "estop_x", "pico_stale", "hold", "sim_suite", "reach_fwd"])
+    ap.add_argument("--selftest-redis", action="store_true", help="with --selftest: still write to Redis")
+    ap.add_argument("--log-dir", default=str(Path.home() / "nextech_setup" / "logs"))
+    args = ap.parse_args()
+    if args.selftest:
+        args.no_redis = args.no_redis or not args.selftest_redis
+        args.duration = args.duration or {"none": 16.0, "hold": 12.0, "sim_suite": 24.0,
+                                          "reach_fwd": 17.0}.get(args.scenario, 9.0)
+
+    def on_sigterm(signum, frame):
+        raise StopRequested("SIGTERM")
+    signal.signal(signal.SIGTERM, on_sigterm)
+
+    sides = ["right"] if args.arms == "right" else ["left", "right"]
+    model = build_arm_model(sides)
+    names = [mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j) for j in range(model.njnt)]
+    q0 = np.array([dict(zip(ARM_JOINTS[s], DEFAULT_Q[s]))[n] for n in names for s in sides if n in ARM_JOINTS[s]])
+    cfg = mink.Configuration(model)
+    cfg.update(q0)
+
+    frame_tasks = {s: mink.FrameTask(HAND_BODY[s], "body", position_cost=1.0, orientation_cost=args.orient_cost,
+                                     lm_damping=args.lm_damping) for s in sides}
+
+    # Absolute mode geometry: robot shoulder points (shoulder_roll_link, pelvis welded) and straight-arm reach.
+    geo = mujoco.MjData(model)
+    mujoco.mj_kinematics(model, geo)
+    rob_sh = {s: geo.xpos[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, f"{s}_shoulder_roll_link")].copy()
+              for s in sides}
+    reach = 0.0
+    for s in sides:
+        ej = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"{s}_elbow_joint")
+        hb = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, HAND_BODY[s])
+        for e in np.linspace(model.jnt_range[ej][0], model.jnt_range[ej][1], 40):
+            geo.qpos[:] = 0.0
+            geo.qpos[model.jnt_qposadr[ej]] = e
+            mujoco.mj_kinematics(model, geo)
+            reach = max(reach, float(np.linalg.norm(geo.xpos[hb] - rob_sh[s])))
+    abs_scale = args.abs_scale or reach / args.human_arm
+    R_fix = R.from_euler("y", args.orient_pitch, degrees=True).as_matrix()
+    posture = mink.PostureTask(model, cost=args.posture_cost)
+    posture.set_target(q0)
+    base_limits = [mink.ConfigurationLimit(model), mink.VelocityLimit(model, {n: args.max_vel for n in names})]
+    limits = list(base_limits)
+
+    def coll_geoms(bodies):
+        ids = []
+        for bn in bodies:
+            b = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, bn)
+            if b >= 0:
+                ids += [g for g in mink.get_body_geom_ids(model, b) if model.geom_contype[g] or model.geom_conaffinity[g]]
+        return ids
+
+    coll_pairs = [(coll_geoms([f"{s}_{l}" for l in ARM_LINKS]), coll_geoms(BODY_LINKS)) for s in sides]
+    if len(sides) == 2:
+        coll_pairs.append((coll_geoms([f"left_{l}" for l in FOREARM_LINKS]),
+                           coll_geoms([f"right_{l}" for l in FOREARM_LINKS])))
+
+    def min_pair_distance():
+        best = 1.0
+        for ga, gb in coll_pairs:
+            for a in ga:
+                for b in gb:
+                    best = min(best, mujoco.mj_geomDistance(model, cfg.data, a, b, 1.0, None))
+        return best
+
+    coll = {"limit": None, "margin": 0.0}
+
+    def set_collision_limit():
+        """Collision avoidance with the requested margin, never tighter than the current pose allows
+        (otherwise the arms would be pushed away the moment the grip is pressed)."""
+        nonlocal limits
+        if args.collision_margin <= 0:
+            limits = list(base_limits)
+            return None
+        dmin = min_pair_distance()
+        margin = max(0.0, min(args.collision_margin, dmin - 0.005))
+        coll["limit"] = mink.CollisionAvoidanceLimit(
+            model, geom_pairs=coll_pairs, minimum_distance_from_collisions=margin,
+            collision_detection_distance=margin + 0.08)
+        coll["margin"] = coll["margin0"] = margin
+        limits = list(base_limits) + [coll["limit"]]
+        return dmin, margin
+
+    def reset_collision_margin():
+        """Back to the enable-time margin, so B can glide all the way back to the start pose."""
+        lim = coll["limit"]
+        if lim is not None:
+            coll["margin"] = coll["margin0"]
+            lim.minimum_distance_from_collisions = coll["margin0"]
+            lim.collision_detection_distance = coll["margin0"] + 0.08
+
+    def widen_collision_margin():
+        """Ratchet the margin up toward the requested value as the arms move away from the body."""
+        lim = coll["limit"]
+        if lim is None or coll["margin"] >= args.collision_margin or returning:
+            return
+        new = min(args.collision_margin, min_pair_distance() - 0.005)
+        if new > coll["margin"] + 0.002:
+            coll["margin"] = new
+            lim.minimum_distance_from_collisions = new
+            lim.collision_detection_distance = new + 0.08
+
+    dt = 1.0 / args.rate
+    max_step = args.max_vel * dt
+
+    def hand_pose(side):
+        T = cfg.get_transform_frame_to_world(HAND_BODY[side], "body")
+        return T.translation().copy(), T.rotation().as_matrix().copy()
+
+    def set_target(side, p, Rm):
+        frame_tasks[side].set_target(mink.SE3.from_rotation_and_translation(mink.SO3.from_matrix(Rm), p))
+
+    default_pose = {s: hand_pose(s) for s in sides}   # replaced by the measured start pose at enable
+    for s in sides:
+        set_target(s, *default_pose[s])
+    home_q = q0.copy()
+    fixed_out = {}   # measured angles of arms outside the IK model (--arms right), captured at enable
+    jlo, jhi = model.jnt_range[:, 0] + 1e-3, model.jnt_range[:, 1] - 1e-3
+
+    rds = None if args.no_redis else __import__("redis").Redis(host=args.redis_host, port=6379)
+    if rds is not None and rds.delete("teleop_stop"):
+        print("cleared an old teleop_stop flag (restart from the PC = reset)")
+    source = SyntheticSource(args.scenario) if args.selftest else SdkSource()
+
+    def bridge_tracking():
+        """True when the bridge owns the arms at full weight (TRACK). Without Redis (offline self-test): True."""
+        raw = rds.hget("teleop_state", "bridge") if rds is not None else None
+        if rds is None:
+            return True
+        if not raw:
+            return False
+        b = json.loads(raw)
+        return b.get("state") == "TRACK" and time.time() - float(b["t"]) < 0.5
+
+    def read_measured():
+        """Arm angles measured by the bridge from rt/lowstate (Redis `arm_state`), if fresh."""
+        raw = rds.get("arm_state") if rds is not None else None
+        if not raw:
+            return None
+        msg = json.loads(raw)
+        if time.time() - float(msg["t"]) > STALE_S:
+            return None
+        return dict(zip(msg["names"], msg["q"]))
+    log_dir = Path(args.log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    tag = "selftest_" + args.scenario if args.selftest else "live"
+    log_path = log_dir / f"arm_ik_{tag}_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+    logf = open(log_path, "w", newline="")
+    log = csv.writer(logf)
+    log.writerow(["t", "wall", "active", "follow", "estop", "drill", "trigger", "grip", "stale", "ik_ms", "loop_ms",
+                  "A", "B", "X", "Y", "stamp_age_ms", "head_ok", "right_ok"]
+                 + [f"q_{n}" for n in ALL_NAMES] + [f"hand_{s}_{a}" for s in sides for a in "xyz"]
+                 + [f"ctrl_{s}_{a}" for s in ("left", "right") for a in "xyz"] + [f"head_{a}" for a in "xyz"]
+                 + ["lgrip", "ltrig", "lmenu", "rmenu", "lclick", "rclick", "laxis_x", "laxis_y", "raxis_x", "raxis_y"])
+
+    active = follow = drill = returning = False
+    estop, estop_reason = False, ""
+    prev = {"A": False, "B": False, "grip": False}
+    grip_on = grip_wait_noted = False
+    clutch = {}
+    last_stamp, last_stamp_change = None, time.time()
+    ik_times, loop_times = [], []
+    checks = {}
+    rate = RateLimiter(frequency=args.rate, warn=False)
+    # Everything loaded so far (torch, mujoco, mink) is long-lived: keep it out of the collector, which
+    # otherwise does a ~150 ms full pass about 17 s into the run.
+    gc.collect()
+    gc.freeze()
+    t_start = time.time()
+    last_print = -1.0
+    q14 = None
+    if args.mode == "absolute":
+        print(f"arm_ik_dryrun: ABSOLUTE mode, robot reach {reach:.3f} m, scale {abs_scale:.2f} "
+              f"(human arm {args.human_arm} m), robot shoulders " +
+              ", ".join(f"{s} {np.round(rob_sh[s], 3).tolist()}" for s in sides))
+    else:
+        print(f"arm_ik_dryrun: RELATIVE mode, scale={args.scale} rot_scale={args.rot_scale} max_reach={args.max_reach}m")
+    print(f"arm_ik_dryrun: arms={args.arms} rate={args.rate}Hz max_vel={args.max_vel} selftest={args.selftest}/"
+          f"{args.scenario} log={log_path}")
+
+    def publish(now, drill_out, trig):
+        if rds is None:
+            return
+        rds.set("arm_ik_q", json.dumps({"t": now, "active": active, "follow": follow, "estop": estop,
+                                        "estop_reason": estop_reason, "names": ALL_NAMES, "q": q14}))
+        rds.set("drill_cmd", json.dumps({"t": now, "on": int(drill_out), "trigger": trig}))
+        state = "ESTOP" if estop else ("FOLLOW" if follow else ("ENABLED" if active else "PAUSED"))
+        rds.hset("teleop_state", "ik", json.dumps({"t": now, "state": state, "reason": estop_reason}))
+
+    def trip(t, reason):
+        nonlocal estop, estop_reason, active, follow, returning
+        if not estop:
+            estop, estop_reason = True, reason
+            active = follow = returning = False
+            print(f"[{t:6.1f}s] EMERGENCY STOP: {reason}")
+
+    try:
+        while True:
+            t_loop = time.perf_counter()
+            t = time.time() - t_start
+            if args.duration and t > args.duration:
+                break
+            d = source.read(t)
+
+            # Data freshness.
+            if d["stamp"] != last_stamp:
+                last_stamp, last_stamp_change = d["stamp"], time.time()
+            stale = (time.time() - last_stamp_change) > STALE_S or d["head"] is None or d["right"] is None
+
+            # Emergency stops (latched).
+            if d["X"] or d["Y"]:
+                trip(t, "left X/Y pressed")
+            if stale and active:
+                trip(t, "PICO data missing > 0.3 s")
+            if rds is not None and rds.exists("teleop_stop"):
+                trip(t, "stop command (teleop_stop)")
+
+            # A: enable (start pose = measured arm angles) / pause. B: glide back to the start pose, then pause.
+            # Ignored after an emergency stop.
+            if not estop:
+                if d["A"] and not prev["A"]:
+                    if stale:
+                        print(f"[{t:6.1f}s] A pressed but PICO data is stale -> ignored")
+                    elif active:
+                        active, returning, follow = False, False, False
+                        print(f"[{t:6.1f}s] A -> paused")
+                    else:
+                        meas = read_measured()
+                        if meas is None and rds is not None:
+                            print(f"[{t:6.1f}s] A ignored: no fresh arm_state (is arm_sdk_bridge.py running?)")
+                        else:
+                            if meas is not None:
+                                home_q = np.clip(np.array([meas[n] for n in names]), jlo, jhi)
+                                fixed_out = {n: meas[n] for n in ALL_NAMES if n not in names}
+                            else:
+                                home_q = cfg.q.copy()   # offline self-test without the bridge
+                            cfg.update(home_q)
+                            posture.set_target(home_q)
+                            cl = set_collision_limit()
+                            for s in sides:
+                                default_pose[s] = hand_pose(s)
+                                set_target(s, *default_pose[s])
+                            active, returning, follow = True, False, False
+                            src = "measured" if meas is not None else "IK default (no bridge)"
+                            col = (f"collision margin {cl[1] * 100:.1f} cm (closest arm-body gap now {cl[0] * 100:.1f} cm)"
+                                   if cl else "collision avoidance off")
+                            print(f"[{t:6.1f}s] A -> ENABLED, start pose = {src} angles, {col}; hold the right grip to move")
+                if d["B"] and not prev["B"] and active:
+                    follow, returning = False, True
+                    reset_collision_margin()
+                    for s in sides:
+                        set_target(s, *default_pose[s])
+                    print(f"[{t:6.1f}s] B -> gliding back to the start pose, then pause")
+            prev["A"], prev["B"] = d["A"], d["B"]
+
+            # Dead-man on the right grip (hysteresis). Each new grip re-anchors the clutch: no jump.
+            if grip_on and d["grip"] < 0.4:
+                grip_on = False
+            elif not grip_on and d["grip"] > 0.6:
+                grip_on = True
+            new_follow = active and grip_on and not stale and not estop and not returning
+            if new_follow and not follow and not bridge_tracking():
+                # The bridge is still ramping its weight: nothing follows until it fully owns the arms.
+                if not grip_wait_noted:
+                    print(f"[{t:6.1f}s] grip held, waiting for the bridge to reach TRACK (weight ramp)")
+                    grip_wait_noted = True
+                new_follow = False
+            if not grip_on:
+                grip_wait_noted = False
+            if new_follow and not follow:
+                yaw0 = head_yaw(d["head"][1])
+                clutch = {"Rz": rot_z(-yaw0), "yaw0": yaw0, "q": cfg.q.copy()}
+                for s in sides:
+                    clutch[s] = {"c": d[s], "h": hand_pose(s)}
+                    clutch[s]["tgt"] = hand_pose(s)   # rate-limited target (absolute mode) starts at the hand
+                print(f"[{t:6.1f}s] grip -> FOLLOW (head yaw {math.degrees(yaw0):.0f} deg)")
+            elif follow and not new_follow and active:
+                print(f"[{t:6.1f}s] grip released -> arms hold")
+            if follow and not new_follow:
+                for s in sides:      # freeze the targets where the arms are now
+                    set_target(s, *hand_pose(s))
+            follow = new_follow
+
+            # Hand targets, in the operator's facing direction at the grip (head yaw).
+            if follow:
+                for s in sides:
+                    if d[s] is None:
+                        continue
+                    (c0p, c0R), (h0p, h0R) = clutch[s]["c"], clutch[s]["h"]
+                    cp, cR = d[s]
+                    if args.mode == "absolute":
+                        # Operator hand relative to the operator's shoulder (estimated from the headset),
+                        # scaled, placed at the robot's shoulder. Orientation: controller -> hand, fixed map.
+                        Ryaw = rot_z(clutch["yaw0"])
+                        centre = M @ d["head"][0] + Ryaw @ np.array([-args.head_back, 0.0, -args.head_down])
+                        side_y = (0.5 if s == "left" else -0.5) * args.human_shoulder_width
+                        op_sh = centre + Ryaw @ np.array([0.0, side_y, 0.0])
+                        v = abs_scale * (clutch["Rz"] @ (M @ cp - op_sh))
+                        if args.max_forward > 0:      # keep the arms from reaching far out (waist load)
+                            v[0] = min(v[0], args.max_forward)
+                        n = np.linalg.norm(v)
+                        if n > args.reach_frac * reach:
+                            v *= args.reach_frac * reach / n
+                        want_p, want_R = rob_sh[s] + v, clutch["Rz"] @ (M @ cR @ M.T) @ R_fix
+                        # Move the target toward the wanted pose at a limited speed: a slow approach right
+                        # after the grip, and no jumps when the operator moves fast.
+                        p0, R0 = clutch[s]["tgt"]
+                        step = want_p - p0
+                        n = np.linalg.norm(step)
+                        if n > args.hand_speed * dt:
+                            step *= args.hand_speed * dt / n
+                        rv = R.from_matrix(want_R @ R0.T).as_rotvec()
+                        a = np.linalg.norm(rv)
+                        if a > args.hand_turn * dt:
+                            rv *= args.hand_turn * dt / a
+                        clutch[s]["tgt"] = (p0 + step, R.from_rotvec(rv).as_matrix() @ R0)
+                        set_target(s, *clutch[s]["tgt"])
+                        continue
+                    dp = args.scale * (clutch["Rz"] @ M @ (cp - c0p))
+                    n = np.linalg.norm(dp)
+                    if n > args.max_reach:
+                        dp *= args.max_reach / n
+                    dR = clutch["Rz"] @ M @ (cR @ c0R.T) @ M.T @ clutch["Rz"].T
+                    dR = R.from_rotvec(args.rot_scale * R.from_matrix(dR).as_rotvec()).as_matrix()
+                    set_target(s, h0p + dp, dR @ h0R)
+
+            # IK step only while following or gliding back; otherwise the arms hold.
+            t_ik = time.perf_counter()
+            if follow or returning:
+                widen_collision_margin()
+                q_prev = cfg.q.copy()
+                vel = mink.solve_ik(cfg, list(frame_tasks.values()) + [posture], dt, "daqp",
+                                    damping=1e-3, limits=limits)
+                cfg.integrate_inplace(vel, dt)
+                cfg.update(q_prev + np.clip(cfg.q - q_prev, -max_step, max_step))
+                if returning and np.max(np.abs(cfg.q - home_q)) < 0.02:
+                    returning, active = False, False
+                    print(f"[{t:6.1f}s] start pose reached -> paused")
+            ik_ms = (time.perf_counter() - t_ik) * 1000.0
+
+            # Drill: right trigger (hysteresis), only while following (enabled + grip) and nothing tripped.
+            trig = d["trigger"]
+            if drill and trig < 0.4:
+                drill = False
+            elif not drill and trig > 0.6:
+                drill = True
+            drill_out = drill and follow and not estop
+
+            q_by_name = dict(zip(names, cfg.q))
+            for s in ("left", "right"):
+                if s not in sides:   # arm outside the IK model: hold what was measured at enable
+                    q_by_name.update({n: fixed_out.get(n, v) for n, v in zip(ARM_JOINTS[s], DEFAULT_Q[s])})
+            q14 = [float(q_by_name[n]) for n in ALL_NAMES]
+            publish(time.time(), drill_out, trig)
+
+            hands = [v for s in sides for v in hand_pose(s)[0]]
+            ctrl = np.concatenate([(M @ d[s][0]) if d[s] is not None else np.zeros(3) for s in ("left", "right")]
+                                  + [(M @ d["head"][0]) if d["head"] is not None else np.zeros(3)])
+            loop_ms = (time.perf_counter() - t_loop) * 1000.0
+            ik_times.append(ik_ms)
+            loop_times.append(loop_ms)
+            log.writerow([f"{t:.3f}", f"{time.time():.3f}", int(active), int(follow), int(estop), int(drill_out), f"{trig:.2f}",
+                          f"{d['grip']:.2f}", int(stale), f"{ik_ms:.2f}", f"{loop_ms:.2f}",
+                          int(d["A"]), int(d["B"]), int(d["X"]), int(d["Y"]),
+                          f"{(time.time() - last_stamp_change) * 1000:.0f}",
+                          int(d["head"] is not None), int(d["right"] is not None)]
+                         + [f"{v:.4f}" for v in q14] + [f"{v:.4f}" for v in hands] + [f"{v:.4f}" for v in ctrl]
+                         + [f"{d.get('lgrip', 0.0):.2f}", f"{d.get('ltrig', 0.0):.2f}"]
+                         + [int(d.get(k, False)) for k in ("lmenu", "rmenu", "lclick", "rclick")]
+                         + [f"{v:.2f}" for v in (list(d.get("laxis", [0.0, 0.0]))[:2] + list(d.get("raxis", [0.0, 0.0]))[:2])])
+
+            if args.selftest and args.scenario == "none":
+                for name, t0, t1 in SyntheticSource.PHASES:
+                    if name not in checks and t >= (t0 + t1) / 2 and follow:
+                        hp, hR = hand_pose("right")
+                        h0p, h0R = clutch["right"]["h"]
+                        rel = R.from_matrix(hR @ h0R.T).as_rotvec()
+                        checks[name] = (hp - h0p, np.degrees(rel))
+
+            if t - last_print >= 1.0:
+                last_print = t
+                r = [round(float(q_by_name[n]), 2) for n in ARM_JOINTS["right"]]
+                print(f"[{t:6.1f}s] active={int(active)} follow={int(follow)} estop={int(estop)} drill={int(drill_out)} "
+                      f"ik={ik_ms:.1f}ms right_q={r}")
+            rate.sleep()
+    except (KeyboardInterrupt, StopRequested) as e:
+        trip(time.time() - t_start, "Ctrl+C" if isinstance(e, KeyboardInterrupt) else "SIGTERM")
+    finally:
+        if not estop:
+            trip(time.time() - t_start, "IK program exited")
+        if rds is not None and q14 is not None:
+            publish(time.time(), False, 0.0)
+        source.close()
+        logf.close()
+
+    ik, lp = np.array(ik_times), np.array(loop_times)
+    print(f"timing over {len(lp)} loops: ik avg {ik.mean():.2f} ms / max {ik.max():.2f} ms, "
+          f"loop avg {lp.mean():.2f} ms / p95 {np.percentile(lp, 95):.2f} ms / max {lp.max():.2f} ms "
+          f"(budget {dt * 1000:.1f} ms)")
+    for name, (dp, drot) in checks.items():
+        print(f"check {name:7s}: hand moved x{dp[0]:+.3f} y{dp[1]:+.3f} z{dp[2]:+.3f} m, rot {np.round(drot, 1)} deg")
+    print(f"log: {log_path}")
+
+
+if __name__ == "__main__":
+    main()
