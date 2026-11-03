@@ -19,6 +19,8 @@
 #   multicast        : videohub_pc4 の H.264 マルチキャストを受ける (2026-11 の G1 では流れておらず使えない)。
 #   test             : テスト模様。カメラなしで PICO までの経路を確かめる。
 #
+# 腕テレオペの状態 (Redis teleop_display) は映像の上に文字で重ねる (読むだけ)。重ねないときは --no-overlay。
+#
 # PICO 側: XRobot アプリ → Remote Vision → カメラ (ZEDMINI か PICO4U) → Listen → 192.168.123.164 → Confirm
 # =============================================================================
 set -u
@@ -118,7 +120,7 @@ case "$cmd" in
     esac
     ;;
   *)
-    sed -n 2,24p "$0"
+    sed -n 2,25p "$0"
     exit 1
     ;;
 esac

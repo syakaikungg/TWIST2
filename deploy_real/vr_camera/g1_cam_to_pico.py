@@ -54,6 +54,8 @@ try:
 except (ValueError, ImportError):
     GstVideo = None
 
+from status_overlay import StatusOverlay, has_japanese_font  # noqa: E402
+
 
 # ---------------------------------------------------------------------------
 # ログ
@@ -187,9 +189,17 @@ def build_pipeline_desc(args, out_w, out_h, bitrate, hevc):
     else:
         enc_in_caps = "video/x-raw,format=I420"
 
+    # 腕テレオペの状態の文字 (片目の絵に描くので、左右並びでは両目の同じ位置に出る)
+    ovl = ""
+    if args.overlay_ok:
+        size = args.overlay_font_size or max(12, int(round(eye_h * 0.042)))
+        ovl = ('textoverlay name=ovl text="" auto-resize=false font-desc="%s %d" '
+               'valignment=%s halignment=center ypad=%d shaded-background=true wait-text=false ! '
+               % (args.overlay_font, size, args.overlay_pos, max(4, int(eye_h * 0.03))))
+
     if sbs:
         # 左右に同じ映像を並べる (CPU の compositor はコピーだけなので軽い)
-        scale = "%s ! video/x-raw,format=I420,width=%d,height=%d ! " % (conv, eye_w, eye_h)
+        scale = "%s ! video/x-raw,format=I420,width=%d,height=%d ! %s" % (conv, eye_w, eye_h, ovl)
         # Jetson ではエンコーダーの前に NVMM へ戻す (caps を 2 つ続けると parse_launch が失敗するので分ける)
         tail = ("nvvidconv ! %s,width=%d,height=%d ! " % (enc_in_caps, eye_w * 2, eye_h)
                 if args.encoder == "nv" else "")
@@ -201,6 +211,11 @@ def build_pipeline_desc(args, out_w, out_h, bitrate, hevc):
                 "%s name=comp background=black sink_0::xpos=0 sink_1::xpos=%d ! "
                 "video/x-raw,format=I420,width=%d,height=%d ! %s"
                 % (mixer, eye_w, eye_w * 2, eye_h, tail))
+    elif ovl:
+        # 文字を描くために一度 CPU の I420 にして、エンコーダーの前で戻す
+        back = ("nvvidconv ! %s,width=%d,height=%d ! " % (enc_in_caps, eye_w, eye_h)
+                if args.encoder == "nv" else "")
+        body = "%s ! video/x-raw,format=I420,width=%d,height=%d ! %s%s" % (conv, eye_w, eye_h, ovl, back)
     else:
         body = "%s ! %s,width=%d,height=%d ! " % (conv, enc_in_caps, eye_w, eye_h)
 
@@ -315,11 +330,20 @@ class Encoder(object):
             args.cam_width, args.cam_height, args.cam_fps = (
                 self.feeder.width, self.feeder.height, self.feeder.fps)
         desc, sbs, eye_w, eye_h = build_pipeline_desc(args, out_w, out_h, bitrate, hevc)
+        try:
+            self.pipeline = Gst.parse_launch(desc)
+        except Exception as e:
+            if not args.overlay_ok:
+                raise
+            # 状態の文字のせいで映像が止まらないよう、重ねずに作り直す
+            log("注意: 状態の重ね表示を入れるとパイプラインを作れません (%s)。重ねずに続けます" % e)
+            args.overlay_ok = False
+            desc, sbs, eye_w, eye_h = build_pipeline_desc(args, out_w, out_h, bitrate, hevc)
+            self.pipeline = Gst.parse_launch(desc)
         log("pipeline: %s" % desc)
         log("出力 %dx%d (%s, 片目 %dx%d), %d kbps, %s" % (
             eye_w * (2 if sbs else 1), eye_h, "左右ステレオ" if sbs else "モノラル",
             eye_w, eye_h, bitrate // 1000, "H.265" if hevc else "H.264"))
-        self.pipeline = Gst.parse_launch(desc)
         self.sink = self.pipeline.get_by_name("sink")
         self.sink.connect("new-sample", self._on_sample)
         self.enc_elem = None
@@ -333,6 +357,10 @@ class Encoder(object):
         self.frames = 0
         self.bytes = 0
         self.src_caps_logged = False
+        self.overlay = None
+        el = self.pipeline.get_by_name("ovl")
+        if el is not None:
+            self.overlay = StatusOverlay(el, args, log)
 
     def _on_sample(self, sink):
         sample = sink.emit("pull-sample")
@@ -370,6 +398,8 @@ class Encoder(object):
             raise RuntimeError("パイプラインを開始できません (カメラが使用中か、要素が足りない可能性)")
         if self.feeder:
             self.feeder.start(self.pipeline.get_by_name("rawsrc"))
+        if self.overlay:
+            self.overlay.start()
 
     def poll_bus(self, timeout_ms=100):
         """エラー/EOS なら文字列を返す"""
@@ -395,6 +425,8 @@ class Encoder(object):
         return "eos"
 
     def stop(self):
+        if self.overlay:
+            self.overlay.stop()
         if self.feeder:
             self.feeder.stop()
         try:
@@ -530,9 +562,11 @@ class Stream(object):
                     cpu1 = os.times()
                     dt = now - last
                     cpu = 100.0 * ((cpu1.user - cpu0.user) + (cpu1.system - cpu0.system)) / dt
-                    log("送信 %.1f fps, %.0f kbps, 捨て %d, 待ち %d, CPU %.0f%% (経過 %.0f 秒)" % (
+                    ov = self.enc.overlay
+                    log("送信 %.1f fps, %.0f kbps, 捨て %d, 待ち %d, CPU %.0f%% (経過 %.0f 秒)%s" % (
                         (self.sent - last_sent) / dt, (self.sent_bytes - last_bytes) * 8 / dt / 1000,
-                        self.dropped, self.q.qsize(), cpu, now - t0))
+                        self.dropped, self.q.qsize(), cpu, now - t0,
+                        (", 表示 [%s] %s" % (ov.level, ov.text)) if ov else ""))
                     last, last_sent, last_bytes, cpu0 = now, self.sent, self.sent_bytes, cpu1
         except Exception as e:
             log("配信エラー: %s" % e)
@@ -733,6 +767,18 @@ def main():
     p.add_argument("--stats-sec", type=float, default=5.0)
     p.add_argument("--selftest", type=float, default=0, help="秒数。ネットワークなしでエンコードだけ試す")
     p.add_argument("--selftest-out", default="/tmp/g1_cam_selftest.h264")
+    # 腕テレオペの状態の重ね表示 (Redis teleop_display を読むだけ)
+    p.add_argument("--no-overlay", action="store_true", help="腕テレオペの状態を映像に重ねない")
+    p.add_argument("--overlay-key", default="teleop_display", help="状態の Redis キー (IK が書く JSON)")
+    p.add_argument("--overlay-lang", choices=["auto", "ja", "en"], default="auto",
+                   help="auto = 日本語フォントがあれば ja、無ければ en")
+    p.add_argument("--overlay-pos", choices=["top", "bottom"], default="top", help="文字の位置")
+    p.add_argument("--overlay-font", default="Sans Bold", help="pango のフォント名")
+    p.add_argument("--overlay-font-size", type=int, default=0, help="0 なら片目の高さに合わせる (720 で 30)")
+    p.add_argument("--overlay-stale", type=float, default=0.5, help="状態がこの秒数より古ければ IK停止 と出す")
+    p.add_argument("--overlay-hz", type=float, default=10.0, help="状態を読む回数 (1 秒あたり)")
+    p.add_argument("--redis-host", default="127.0.0.1")
+    p.add_argument("--redis-port", type=int, default=6379)
     args = p.parse_args()
     args.cam_width, args.cam_height = parse_size(args.cam_size)
     args.width, args.height = parse_size(args.size)
@@ -752,6 +798,19 @@ def main():
     if missing:
         log("GStreamer の要素が足りません: %s" % missing)
         return 2
+
+    # 状態の重ね表示は無くても映像は送れるので、足りなければ表示なしで続ける
+    args.overlay_ok = False
+    if not args.no_overlay:
+        if not has_element("textoverlay"):
+            log("注意: textoverlay (GStreamer の pango) が無いので、腕テレオペの状態は重ねません")
+        else:
+            args.overlay_ok = True
+            if args.overlay_lang == "auto":
+                fam = has_japanese_font()
+                args.overlay_lang = "ja" if fam else "en"
+                log("状態表示: %s" % ("日本語 (フォント %s)" % fam if fam else
+                                     "英語 (日本語フォントが見つからないため)"))
 
     if args.selftest > 0:
         return selftest(args)

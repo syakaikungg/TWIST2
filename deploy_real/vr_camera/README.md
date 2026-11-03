@@ -14,6 +14,7 @@ G1 の頭の RealSense D435i (RGB) の映像を、PICO の XRobot アプリ (XRo
 | `cam_to_pico.sh` | G1 上での起動・停止・状態・自己テスト |
 | `fake_pico_client.py` | PICO の代わりに要求を送って受信を数えるテスト用クライアント |
 | `sim_head_cam.py` | シミュレーターの G1 の頭カメラ目線を GPU で描き、`--source sim` に渡す |
+| `status_overlay.py` | 腕テレオペの状態 (Redis `teleop_display`) を映像に文字で重ねる。`g1_cam_to_pico.py` が読み込む |
 
 ## 仕組み
 
@@ -95,6 +96,29 @@ bash cam_to_pico.sh stop; bash cam_to_pico.sh simcam stop
 2026-11-03 の G1 での実測: 描画は 1 枚 平均 12.4 ms (1280x720、影・反射なし)、GPU (GR3D) 最大 22%。
 PICO に 30fps で約 9 分配信して捨て 0、関節角の遅れ 0.01 秒。配信中も腕の IK ループ (平均 2.2 ms / 最大 9.7 ms)・
 ブリッジ周期 (最大 23 ms) に影響は見られなかった。
+
+## 腕テレオペの状態を映像に重ねる
+
+腕の IK (`deploy_real/arm_ik/arm_ik_dryrun.py`) が Redis の `teleop_display` に 50 Hz で書く状態
+(`{"t", "level", "ja", "en", ...}`、形式は `deploy_real/arm_ik/README.md`) を 1 秒に 10 回読んで (GET のみ)、
+映像の上の中央に文字で出す。実機カメラでもシムでも同じ。左右並びのときは両目の同じ位置に出る。
+
+| level | 文字の色 | 例 |
+|---|---|---|
+| `stop` | 赤 | 非常停止（PCから再起動が必要） |
+| `warn` | 橙 | 通信待ち（データが戻れば再開） |
+| `wait` | 黄 | 準備中 あと2.1秒（そのあと握れば動く） |
+| `idle` | 灰 | 一時停止中（右Aで開始） |
+| `ready` | 水色 | 握れば動きます |
+| `ok` | 緑 | 追従中 |
+
+- `t` が 0.5 秒より古いと「IK停止（状態が届いていません） N秒」(赤)、キーが無いと「IK未起動」(灰)、
+  Redis につながらないと「状態を読めません（Redis）」(橙) と出す。
+- 日本語フォントが G1 に無ければ (`fc-list :lang=ja` が空)、自動で英語 (`en`) を出す。`--overlay-lang ja|en` で固定できる。
+- GStreamer の `textoverlay` (pango) が無い、または入れるとパイプラインが作れないときは、文字なしで映像だけ送る (ログに「注意」)。
+- 配信中のログの「送信 …」の行の最後に、いま出している表示 (`表示 [ready] 握れば動きます` など) が付く。
+- 主なオプション: `--no-overlay` (重ねない)、`--overlay-pos top|bottom`、`--overlay-font-size 36` (既定は片目の高さ 720 で 30)、
+  `--overlay-key`、`--redis-host` / `--redis-port` (既定 127.0.0.1:6379)。
 
 ## 腕テレオペと同時に使うとき
 
