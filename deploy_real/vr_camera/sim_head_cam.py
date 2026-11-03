@@ -22,6 +22,7 @@ import argparse
 import json
 import math
 import os
+import signal
 import socket
 import struct
 import sys
@@ -351,6 +352,12 @@ def run(args, cam):
         log("描画 %d 枚: 平均 %.1f ms, 95%% %.1f ms, 最大 %.1f ms (%.1f fps 相当)" % (
             args.bench, ts.mean(), np.percentile(ts, 95), ts.max(), args.bench / dt))
         return 0
+    # nohup ... & で起動すると SIGINT が無視された状態で始まり、Python の既定の Ctrl-C 処理が入らない。
+    # cam_to_pico.sh stop の SIGINT / SIGTERM で待ち受け中でも抜けられるよう、自分で受ける。
+    def on_signal(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGINT, on_signal)
+    signal.signal(signal.SIGTERM, on_signal)
     try:
         serve(args, cam)
     except KeyboardInterrupt:
