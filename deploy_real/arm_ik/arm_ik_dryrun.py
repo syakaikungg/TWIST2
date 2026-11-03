@@ -160,6 +160,8 @@ class SyntheticSource:
     scenario "sim_suite": A at 1 s, grip 4.5-19.5 s (after the bridge's 3 s weight ramp); right-hand bumps
       forward/up/left 0.15 m and twist 45 deg (2 s each, from 5 s), both hands toward each other 0.2 m
       (13-16 s), right hand back+left toward the torso (16-19 s); B at 20 s.
+    scenario "reach_fwd": A at 1 s, grip 4.5-13.5 s; both hands from the chest to fully forward at shoulder
+      height (5-7 s), held, back (10-12 s); trigger 7.5-9.5 s (drill ON while reaching); return button at 14 s.
     scenario "buttons": A at 1 s, grip 1.5-6 s with a forward drift, B at 3 s and 5 s (Remote Vision's
       eye switch: must change nothing), return button at 7 s (glide back, pause), A at 10 s (enabled again).
     scenario "stale_hold": A at 1 s, no grip; PICO frozen 3.0-3.5 s and 4.0-4.45 s (holds, no stop); grip
@@ -210,6 +212,7 @@ class SyntheticSource:
             off = a * (far_r - chest_r)
             loff = a * (np.array([-0.19, 1.35, -0.55]) - np.array([-0.25, 1.1, -0.35]))
             d["grip"] = 1.0 if 4.5 <= t < 13.5 else 0.0
+            d["trigger"] = 1.0 if 7.5 <= t < 9.5 else 0.0
             ret = 14.0 <= t < 14.1
         elif sc == "none":
             for name, t0, t1 in self.PHASES:

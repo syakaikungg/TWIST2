@@ -6,7 +6,8 @@ NexTech Week 2026 秋の展示用。G1 の内蔵PC（`~/nextech/arm_ik/`）で�
 |---|---|
 | `arm_ik_dryrun.py` | PICO（xrobotoolkit_sdk）から手の位置を読み、mink で腕14関節の IK を解いて Redis `arm_ik_q` / `drill_cmd` / `teleop_display` に書く。ロボットには何も送らない |
 | `arm_sdk_bridge.py` | Redis `arm_ik_q` → `rt/arm_sdk` の LowCmd。既定はログのみで、`--send` のときだけ送信する。`--sim` は `arm_sim.py` と Redis でつなぐ |
-| `arm_sim.py` | 骨盤と脚を固定した MuJoCo のシミュレーター（腕と腰を arm_sdk と同じ形で動かす） |
+| `arm_sim.py` | 骨盤と脚を固定した MuJoCo のシミュレーター（腕と腰を arm_sdk と同じ形で動かす）。右手に見た目だけのドリルが付く |
+| `sim_drill.py` | シミュレーターのドリルの形と回し方（ビューアーからも使う） |
 | `sim_run.sh` / `sim_live_bg.sh` | シミュレーターでの自動テスト / PICO で操作する live |
 | `run_live.sh` | 実機（`--send`）。本人の確認後にだけ使う |
 | `stop.sh` | 非常停止（Redis `teleop_stop`） |
@@ -51,3 +52,18 @@ IK が毎ループ（50 Hz）書く JSON。PICO の映像に重ねる表示に�
 ## 腰
 
 arm_sdk を有効にすると、腰（12〜14）もこちらの担当になる（公式の arm7 の例と同じ組み合わせ）。既定は TWIST2 の腰ゲイン（kp 150 / kd 4）と、roll・pitch の積分補正（`--waist-correct`）。シミュレーターでの腰の傾きは、最大0.03〜0.04 rad。
+
+## シミュレーターのドリル
+
+`arm_sim.py` は右手に見た目だけのドリルを付ける（重さも当たり判定もないので、物理の結果は変わらない。重さは今までどおり `--payload-kg`）。IK の Redis `drill_cmd` が ON の間（追従中に右トリガー）、先が毎秒3回転で回り、モーターの輪が緑になる。実際の回転数ではなく、映像で回っているのが分かる速さにしている（`--drill-rps`）。`--no-drill` で外せる。
+
+形は仮のもの（アタッチメントが未完成のため）。指の上にクランプ、その先にモーター、チャック（黄色の線）、ビット（平たい刃）が、手の前方向（`right_wrist_yaw_link` の x）に並ぶ。手首から先端まで約37cm。
+
+状態は `sim_qpos` の `"drill": {"on": 0/1, "angle": rad, "rps": 回転/秒}` に入る。`sim_qpos` から絵を描くビューアーは、次の3行で同じドリルを出せる。
+
+```python
+import sim_drill
+sim_drill.add_drill(spec)            # MjSpec.from_file(...) のあと、compile() の前
+view = sim_drill.DrillView(m)        # compile したモデル
+view.apply(m, msg.get("drill"))      # 毎フレーム、mj_kinematics / mj_forward の前
+```

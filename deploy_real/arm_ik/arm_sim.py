@@ -8,6 +8,8 @@ clipped to the motor limits (wrist pitch/yaw 5 Nm, as on the real G1), where "bu
 robot's own controller holding its standing arm posture. Steps MuJoCo in real time and writes
 `sim_lowstate` (q, dq, tau) for the bridge and `sim_qpos` (joint angles by name) for viewers.
 Records self-contacts (arm vs torso/head/pelvis/other arm), torques, tracking error and joint-limit proximity.
+The right hand carries a drill you can see (sim_drill.py, looks only): it spins while IK's Redis `drill_cmd`
+says ON, and its state goes into `sim_qpos` as "drill" for the viewers. --no-drill leaves it out.
 
   python arm_sim.py --duration 40 [--payload-kg 1.5 --payload-offset 0.05] [--video out.mp4]
 """
@@ -21,6 +23,8 @@ from pathlib import Path
 import mujoco
 import numpy as np
 import redis
+
+import sim_drill
 
 MODEL = str(Path.home() / "nextech" / "TWIST2" / "assets" / "g1" / "g1_sim2sim_29dof.xml")
 ARM_NAMES = [
@@ -44,7 +48,7 @@ JOINT_MOTOR.update({"waist_yaw_joint": "N7520-14", "waist_roll_joint": "N5020", 
 ARM_BODY_KEYS = ("shoulder", "elbow", "wrist", "rubber_hand", "drill_payload")
 
 
-def build_model(payload_kg, payload_offset):
+def build_model(payload_kg, payload_offset, drill=True):
     spec = mujoco.MjSpec.from_file(MODEL)
     keep = set(JOINT_NAMES)
     for a in list(spec.actuators):
@@ -71,7 +75,9 @@ def build_model(payload_kg, payload_offset):
         d = d / (np.linalg.norm(d) or 1.0)
         b = wrist.add_body(name="drill_payload", pos=(np.array(hand.pos) + payload_offset * d).tolist())
         b.add_geom(type=mujoco.mjtGeom.mjGEOM_SPHERE, size=[0.03, 0, 0], mass=payload_kg,
-                   contype=0, conaffinity=0, rgba=[1.0, 0.5, 0.0, 1.0])
+                   contype=0, conaffinity=0, rgba=[1.0, 0.5, 0.0, 0.0 if drill else 1.0])   # hidden by the drill
+    if drill:                            # looks only: no mass, no contacts, so the physics is the same
+        sim_drill.add_drill(spec)
     return spec.compile()
 
 
@@ -82,13 +88,18 @@ def main():
     ap.add_argument("--builtin-kd", type=float, default=1.5)
     ap.add_argument("--payload-kg", type=float, default=0.0, help="dummy drill mass at the right hand")
     ap.add_argument("--payload-offset", type=float, default=0.05, help="beyond the hand along the forearm [m]")
+    ap.add_argument("--no-drill", action="store_true", help="leave out the drill drawn at the right hand")
+    ap.add_argument("--drill-rps", type=float, default=3.0, help="drawn spin speed while ON [rev/s] (not the real one)")
     ap.add_argument("--video", default="", help="mp4 path (offscreen render, needs EGL)")
     ap.add_argument("--tag", default="")
     ap.add_argument("--log-dir", default=str(Path.home() / "nextech_setup" / "logs"))
     args = ap.parse_args()
 
-    m = build_model(args.payload_kg, args.payload_offset)
+    m = build_model(args.payload_kg, args.payload_offset, drill=not args.no_drill)
     d = mujoco.MjData(m)
+    drill_view = sim_drill.DrillView(m)
+    spin = sim_drill.DrillSpin(rps=args.drill_rps)
+    drill_on, drill_wall = False, 0.0
     jid = [mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, n) for n in JOINT_NAMES]
     qadr = np.array([m.jnt_qposadr[j] for j in jid])
     vadr = np.array([m.jnt_dofadr[j] for j in jid])
@@ -152,7 +163,8 @@ def main():
     log.writerow(["t", "wall", "weight", "cmd_age_ms", "contacts", "contact_pairs"] + [f"q_{n}" for n in JOINT_NAMES]
                  + [f"cmd_{n}" for n in JOINT_NAMES] + [f"tau_{n}" for n in JOINT_NAMES])
     print(f"arm_sim: model {os.path.basename(MODEL)} (pelvis+legs welded), timestep {m.opt.timestep}s, "
-          f"payload {args.payload_kg} kg, wrist pitch/yaw limit 5 Nm, motor armature added, log {log_path}")
+          f"payload {args.payload_kg} kg, wrist pitch/yaw limit 5 Nm, motor armature added, "
+          f"drill {'off' if args.no_drill else 'drawn'}, log {log_path}")
     if baseline:
         print("contacts already present in the standing pose (ignored as baseline):", list(baseline))
 
@@ -176,6 +188,12 @@ def main():
                            "kd": np.array(c["kd"], dtype=float), "t": float(c["t"])}   # scalar or per joint
                 if time.time() - cmd["t"] > 0.3:     # no fresh command: the robot's own control only
                     cmd["weight"] = 0.0
+                raw = rds.get("drill_cmd")            # IK's drill ON/OFF (stale -> OFF)
+                try:
+                    c = json.loads(raw) if raw else {}
+                    drill_on = bool(c.get("on")) and time.time() - float(c.get("t", 0.0)) < 0.3
+                except (ValueError, TypeError):
+                    drill_on = False
                 rds.set("sim_lowstate", json.dumps({"t": time.time(), "names": JOINT_NAMES,
                                                     "q": d.qpos[qadr].tolist(), "dq": d.qvel[vadr].tolist(),
                                                     "tau": d.actuator_force[act].tolist()}))
@@ -205,8 +223,11 @@ def main():
             if wall >= next_log:         # 50 Hz record + viewer stream
                 next_log += 0.02
                 q = d.qpos[qadr]
+                drill_state = spin.update(drill_on, wall - drill_wall)
+                drill_wall = wall
                 rds.set("sim_qpos", json.dumps({"t": time.time(), "joints": dict(zip(JOINT_NAMES, q.tolist())),
                                                 "weight": cmd["weight"], "payload_kg": args.payload_kg,
+                                                "drill": drill_state,
                                                 "contacts": [list(k) for k in self_contacts() if k not in baseline]}))
                 pairs = [f"{a}|{b}" for (a, b) in self_contacts() if (a, b) not in baseline]
                 log.writerow([f"{d.time:.3f}", f"{time.time():.3f}", f"{cmd['weight']:.3f}",
@@ -215,6 +236,8 @@ def main():
                              + [f"{v:.2f}" for v in d.actuator_force[act]])
             if renderer is not None and wall >= next_frame:
                 next_frame += 1.0 / 30
+                drill_view.apply(m, spin.state())
+                mujoco.mj_kinematics(m, d)
                 renderer.update_scene(d, camera=cam)
                 frames.append(renderer.render().copy())
             time.sleep(0.0005)
