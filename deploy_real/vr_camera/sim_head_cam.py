@@ -211,9 +211,11 @@ class HeadCam(object):
         self.model = build_model(args.model, args.body, D435_POS if not args.cam_pos else tuple(args.cam_pos),
                                  args.cam_pitch, args.fovy, not args.no_floor)
         self.data = mujoco.MjData(self.model)
+        # 腕シム (arm_sim.py) は keyframe・freejoint・脚の関節を消しているので、骨盤は XML の pos (0 0 0.793)、
+        # 脚は角度 0 のまま。ここでも keyframe ("home" は骨盤 1.0 m・膝曲げ) は使わず qpos0 から始める。
         mujoco.mj_resetData(self.model, self.data)
-        if self.model.nkey > 0:
-            mujoco.mj_resetDataKeyframe(self.model, self.data, 0)
+        if args.keyframe >= 0:
+            mujoco.mj_resetDataKeyframe(self.model, self.data, args.keyframe)
         mujoco.mj_forward(self.model, self.data)
         self.renderer = mujoco.Renderer(self.model, args.height, args.width)
         self.opt = mujoco.MjvOption()
@@ -292,6 +294,7 @@ def main():
     p.add_argument("--cam-pos", type=float, nargs=3, default=None, help="body からの位置 (既定 D435i)")
     p.add_argument("--cam-pitch", type=float, default=D435_PITCH, help="下向きの角度 rad (既定 D435i)")
     p.add_argument("--fovy", type=float, default=42.0, help="縦の画角 (度)")
+    p.add_argument("--keyframe", type=int, default=-1, help="初期姿勢に使う keyframe 番号 (既定 -1 = 使わない。腕シムと同じ)")
     p.add_argument("--no-floor", action="store_true")
     p.add_argument("--shadows", action="store_true", help="影を描く (既定は切る)")
     p.add_argument("--width", type=int, default=1280)
@@ -308,6 +311,16 @@ def main():
     args = p.parse_args()
 
     cam = HeadCam(args)
+    try:
+        return run(args, cam)
+    finally:
+        try:
+            cam.renderer.close()
+        except Exception:
+            pass
+
+
+def run(args, cam):
     if args.png:
         img = cam.frame()
         try:
@@ -338,7 +351,10 @@ def main():
         log("描画 %d 枚: 平均 %.1f ms, 95%% %.1f ms, 最大 %.1f ms (%.1f fps 相当)" % (
             args.bench, ts.mean(), np.percentile(ts, 95), ts.max(), args.bench / dt))
         return 0
-    serve(args, cam)
+    try:
+        serve(args, cam)
+    except KeyboardInterrupt:
+        log("終了")
     return 0
 
 
