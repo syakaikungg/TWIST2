@@ -20,7 +20,8 @@ start pose when A is pressed, so the arms do not move until the grip is held. Th
 angles measured when RAMP_UP starts (the official example drives it to 0 instead). Waist gains default to
 TWIST2's 150/4 (chosen 2026-11-03), and --waist-correct (roll,pitch by default) slowly adds the measured waist
 sag to the waist target while in TRACK (integral correction, limited in size and rate); it starts from 0 and
-eases back to 0 on pause, B and emergency stop.
+eases back to 0 on pause, return-to-start and emergency stop. The state report (Redis teleop_state/bridge)
+includes ramp_left, the seconds left in RAMP_UP, for the operator display.
 """
 import argparse
 import csv
@@ -237,8 +238,10 @@ def main():
     leaving = False
 
     def report(now):
+        ramp_left = (1.0 - weight) * args.ramp_up if mode == "RAMP_UP" else 0.0   # for the operator display
         rds.hset("teleop_state", "bridge", json.dumps({"t": now, "state": mode, "weight": round(weight, 3),
-                                                        "reason": reason, "send": bool(args.send), "sim": bool(args.sim)}))
+                                                        "ramp_left": round(ramp_left, 2), "reason": reason,
+                                                        "send": bool(args.send), "sim": bool(args.sim)}))
 
     def estop(t, why):
         nonlocal mode, reason

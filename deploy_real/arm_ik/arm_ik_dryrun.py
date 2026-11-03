@@ -10,10 +10,15 @@ Operator controls (one person, headset on):
                  Pause: the bridge hands the arms back to the built-in controller.
   right grip     dead-man: the arms follow the hands only while it is held; release = arms stop where they are
   right trigger  drill ON while held (only while enabled and the grip is held)
-  right B        glide back to the start pose measured at enable, then pause
+  right stick press (--return-button, default rclick)
+                 glide back to the start pose measured at enable, then pause. Not B: in the PICO app's
+                 Remote Vision B switches the camera view between one eye and both eyes.
   left X or Y    EMERGENCY STOP (latched until this program is restarted from the PC)
-Also an emergency stop: PICO data missing for 0.3 s while enabled, `teleop_stop` set in Redis (stop.sh),
-Ctrl+C / SIGTERM.
+Also an emergency stop: PICO data missing for 0.3 s while following (grip held), or for more than
+--stale-hold s (default 2) while enabled but not following, `teleop_stop` set in Redis (stop.sh),
+Ctrl+C / SIGTERM. A shorter gap while not following (Wi-Fi hiccup) only holds: the arms stay where they
+are, and teleop carries on by itself when the data is back (hold the grip again to move).
+The state for the operator's display (PICO video overlay) is written to Redis `teleop_display`.
 
   python arm_ik_dryrun.py --arms both
   python arm_ik_dryrun.py --selftest [--scenario deadman|estop_x|pico_stale|none] [--selftest-redis]
@@ -118,12 +123,24 @@ class SdkSource:
             "A": bool(xr.get_A_button()), "B": bool(xr.get_B_button()),
             "X": bool(xr.get_X_button()), "Y": bool(xr.get_Y_button()),
             "stamp": int(xr.get_time_stamp_ns()),
+            # Right stick press: return-to-start button (--return-button rclick).
+            "rclick": bool(xr.get_right_axis_click()),
             # Logged only (to find which input goes with a stop or a data gap).
-            "lgrip": float(xr.get_left_grip()), "ltrig": float(xr.get_left_trigger()),
-            "lmenu": bool(xr.get_left_menu_button()), "rmenu": bool(xr.get_right_menu_button()),
-            "lclick": bool(xr.get_left_axis_click()), "rclick": bool(xr.get_right_axis_click()),
-            "laxis": [float(v) for v in xr.get_left_axis()], "raxis": [float(v) for v in xr.get_right_axis()],
+            "lgrip": self._opt("get_left_grip", float, 0.0), "ltrig": self._opt("get_left_trigger", float, 0.0),
+            "lmenu": self._opt("get_left_menu_button", bool, False),
+            "rmenu": self._opt("get_right_menu_button", bool, False),
+            "lclick": self._opt("get_left_axis_click", bool, False),
+            "laxis": self._opt("get_left_axis", lambda v: [float(x) for x in v], [0.0, 0.0]),
+            "raxis": self._opt("get_right_axis", lambda v: [float(x) for x in v], [0.0, 0.0]),
         }
+
+    def _opt(self, name, conv, default):
+        """Logged-only inputs: tolerate an SDK build without that getter."""
+        fn = getattr(self.xr, name, None)
+        try:
+            return conv(fn()) if fn is not None else default
+        except Exception:
+            return default
 
     def close(self):
         self.xr.close()
@@ -143,6 +160,11 @@ class SyntheticSource:
     scenario "sim_suite": A at 1 s, grip 4.5-19.5 s (after the bridge's 3 s weight ramp); right-hand bumps
       forward/up/left 0.15 m and twist 45 deg (2 s each, from 5 s), both hands toward each other 0.2 m
       (13-16 s), right hand back+left toward the torso (16-19 s); B at 20 s.
+    scenario "buttons": A at 1 s, grip 1.5-6 s with a forward drift, B at 3 s and 5 s (Remote Vision's
+      eye switch: must change nothing), return button at 7 s (glide back, pause), A at 10 s (enabled again).
+    scenario "stale_hold": A at 1 s, no grip; PICO frozen 3.0-3.5 s and 4.0-4.45 s (holds, no stop); grip
+      5-7 s with a forward drift (follows); frozen again from 8 s for good (stop after --stale-hold).
+    "B" in a scenario means the return button (--return-button): the synthetic press goes to that input.
     """
 
     SUITE = [("forward", 5.0, 7.0), ("up", 7.0, 9.0), ("left", 9.0, 11.0), ("twist", 11.0, 13.0),
@@ -150,15 +172,17 @@ class SyntheticSource:
 
     PHASES = [("forward", 1.0, 3.0), ("up", 3.0, 5.0), ("left", 5.0, 7.0), ("twist", 7.0, 9.0)]
 
-    def __init__(self, scenario):
+    def __init__(self, scenario, ret_key="rclick"):
         self.scenario = scenario
+        self.ret_key = ret_key
 
     def read(self, t):
         sc = self.scenario
         head = (np.array([0.0, 1.6, 0.0]), np.eye(3))
         base = np.array([0.25, 1.1, -0.35])            # right hand, in front of the chest (PICO axes)
         off, rot = np.zeros(3), np.eye(3)
-        d = {"trigger": 0.0, "grip": 0.0, "A": 1.0 <= t < 1.1, "B": False, "X": False, "Y": False}
+        d = {"trigger": 0.0, "grip": 0.0, "A": 1.0 <= t < 1.1, "B": False, "X": False, "Y": False, "rclick": False}
+        ret = False   # the return-button press of the scenario
         stamp = int(t * 1e9)
         loff = np.zeros(3)
         if sc == "sim_suite":
@@ -179,14 +203,14 @@ class SyntheticSource:
                     else:                                # right hand back toward the body and across
                         off = np.array([-0.15 * a, 0.0, 0.25 * a])
             d["grip"] = 1.0 if 4.5 <= t < 19.5 else 0.0
-            d["B"] = 20.0 <= t < 20.1
+            ret = 20.0 <= t < 20.1
         elif sc == "reach_fwd":   # both hands from the chest to fully forward at shoulder height, hold, back
             a = float(np.clip((t - 5.0) / 2.0, 0, 1)) - float(np.clip((t - 10.0) / 2.0, 0, 1))
             chest_r, far_r = np.array([0.25, 1.1, -0.35]), np.array([0.19, 1.35, -0.55])
             off = a * (far_r - chest_r)
             loff = a * (np.array([-0.19, 1.35, -0.55]) - np.array([-0.25, 1.1, -0.35]))
             d["grip"] = 1.0 if 4.5 <= t < 13.5 else 0.0
-            d["B"] = 14.0 <= t < 14.1
+            ret = 14.0 <= t < 14.1
         elif sc == "none":
             for name, t0, t1 in self.PHASES:
                 if t0 <= t < t1:
@@ -202,7 +226,7 @@ class SyntheticSource:
             d["grip"] = 1.0 if 1.0 <= t < 10.0 else 0.0
             d["trigger"] = 1.0 if 9.0 <= t < 10.0 else 0.0
             d["A"] = (1.0 <= t < 1.1) or (14.0 <= t < 14.1)
-            d["B"] = 12.0 <= t < 12.1
+            ret = 12.0 <= t < 12.1
         else:
             off = np.array([0.0, 0.0, -0.05 * max(0.0, min(t, 6.0) - 1.5)])   # slow forward drift
             if sc == "deadman":
@@ -219,7 +243,20 @@ class SyntheticSource:
             elif sc == "hold":
                 off = np.array([0.0, 0.0, -0.05 * max(0.0, min(t, 6.0) - 4.0)])
                 d["grip"] = 1.0 if 4.0 <= t < 6.0 else 0.0
-                d["B"] = 7.0 <= t < 7.1
+                ret = 7.0 <= t < 7.1
+            elif sc == "buttons":
+                d["grip"] = 1.0 if 1.5 <= t < 6.0 else 0.0
+                d["B"] = (3.0 <= t < 3.1) or (5.0 <= t < 5.1)
+                ret = 7.0 <= t < 7.1
+                d["A"] = (1.0 <= t < 1.1) or (10.0 <= t < 10.1)
+            elif sc == "stale_hold":
+                off = np.array([0.0, 0.0, -0.05 * max(0.0, min(t, 7.0) - 5.0)])
+                d["grip"] = 1.0 if 5.0 <= t < 7.0 else 0.0
+                for f0, f1 in ((3.0, 3.5), (4.0, 4.45), (8.0, 1e9)):
+                    if f0 <= t < f1:
+                        stamp = int(f0 * 1e9)
+        if ret and self.ret_key in d:
+            d[self.ret_key] = True
         d.update({"head": head, "left": (np.array([-0.25, 1.1, -0.35]) + loff, np.eye(3)),
                   "right": (base + off, rot), "stamp": stamp})
         return d
@@ -261,18 +298,25 @@ def main():
     ap.add_argument("--posture-cost", type=float, default=0.05)
     ap.add_argument("--collision-margin", type=float, default=0.04,
                     help="keep arm links this far from the body / other forearm [m] (0 = off)")
+    ap.add_argument("--return-button", choices=["rclick", "B", "none"], default="rclick",
+                    help="glide back to the start pose, then pause: right stick press (default), B, or none. "
+                         "B is also Remote Vision's one-eye/both-eyes switch.")
+    ap.add_argument("--stale-hold", type=float, default=2.0,
+                    help="PICO data gap tolerated while enabled but not following: the arms hold and teleop "
+                         "resumes when the data is back; longer -> emergency stop [s]. While following: 0.3 s.")
     ap.add_argument("--redis-host", default="127.0.0.1")
     ap.add_argument("--no-redis", action="store_true")
     ap.add_argument("--selftest", action="store_true", help="synthetic inputs, no PICO, no Redis")
     ap.add_argument("--scenario", default="none",
-                    choices=["none", "deadman", "estop_x", "pico_stale", "hold", "sim_suite", "reach_fwd"])
+                    choices=["none", "deadman", "estop_x", "pico_stale", "hold", "sim_suite", "reach_fwd",
+                             "buttons", "stale_hold"])
     ap.add_argument("--selftest-redis", action="store_true", help="with --selftest: still write to Redis")
     ap.add_argument("--log-dir", default=str(Path.home() / "nextech_setup" / "logs"))
     args = ap.parse_args()
     if args.selftest:
         args.no_redis = args.no_redis or not args.selftest_redis
-        args.duration = args.duration or {"none": 16.0, "hold": 12.0, "sim_suite": 24.0,
-                                          "reach_fwd": 17.0}.get(args.scenario, 9.0)
+        args.duration = args.duration or {"none": 16.0, "hold": 12.0, "sim_suite": 24.0, "reach_fwd": 17.0,
+                                          "buttons": 12.0, "stale_hold": 12.0}.get(args.scenario, 9.0)
 
     def on_sigterm(signum, frame):
         raise StopRequested("SIGTERM")
@@ -387,17 +431,22 @@ def main():
     rds = None if args.no_redis else __import__("redis").Redis(host=args.redis_host, port=6379)
     if rds is not None and rds.delete("teleop_stop"):
         print("cleared an old teleop_stop flag (restart from the PC = reset)")
-    source = SyntheticSource(args.scenario) if args.selftest else SdkSource()
+    source = SyntheticSource(args.scenario, args.return_button) if args.selftest else SdkSource()
+
+    def bridge_status():
+        """The bridge's latest state report (Redis teleop_state/bridge) if fresh, else None."""
+        raw = rds.hget("teleop_state", "bridge") if rds is not None else None
+        if not raw:
+            return None
+        b = json.loads(raw)
+        return b if time.time() - float(b["t"]) < 0.5 else None
 
     def bridge_tracking():
         """True when the bridge owns the arms at full weight (TRACK). Without Redis (offline self-test): True."""
-        raw = rds.hget("teleop_state", "bridge") if rds is not None else None
         if rds is None:
             return True
-        if not raw:
-            return False
-        b = json.loads(raw)
-        return b.get("state") == "TRACK" and time.time() - float(b["t"]) < 0.5
+        b = bridge_status()
+        return b is not None and b.get("state") == "TRACK"
 
     def read_measured():
         """Arm angles measured by the bridge from rt/lowstate (Redis `arm_state`), if fresh."""
@@ -418,11 +467,14 @@ def main():
                   "A", "B", "X", "Y", "stamp_age_ms", "head_ok", "right_ok"]
                  + [f"q_{n}" for n in ALL_NAMES] + [f"hand_{s}_{a}" for s in sides for a in "xyz"]
                  + [f"ctrl_{s}_{a}" for s in ("left", "right") for a in "xyz"] + [f"head_{a}" for a in "xyz"]
-                 + ["lgrip", "ltrig", "lmenu", "rmenu", "lclick", "rclick", "laxis_x", "laxis_y", "raxis_x", "raxis_y"])
+                 + ["lgrip", "ltrig", "lmenu", "rmenu", "lclick", "rclick", "laxis_x", "laxis_y", "raxis_x", "raxis_y"]
+                 + ["state", "stale_ms"])
 
     active = follow = drill = returning = False
+    stale_holding = False          # data gap while enabled but not following: hold, resume when it is back
+    missing_since = None           # when the PICO data went bad (frozen stamp or missing pose)
     estop, estop_reason = False, ""
-    prev = {"A": False, "B": False, "grip": False}
+    prev = {"A": False, "B": False, "ret": False, "grip": False}
     grip_on = grip_wait_noted = False
     clutch = {}
     last_stamp, last_stamp_change = None, time.time()
@@ -445,20 +497,61 @@ def main():
     print(f"arm_ik_dryrun: arms={args.arms} rate={args.rate}Hz max_vel={args.max_vel} selftest={args.selftest}/"
           f"{args.scenario} log={log_path}")
 
+    def ik_state():
+        if estop:
+            return "ESTOP"
+        if not active:
+            return "PAUSED"
+        if stale_holding:
+            return "STALE_HOLD"
+        if returning:
+            return "RETURNING"
+        return "FOLLOW" if follow else "ENABLED"
+
+    def display(state, drill_out, now):
+        """One line for the operator (PICO video overlay): what the arms do now and what to press.
+        level: stop / warn / wait / idle / ready / ok."""
+        b = bridge_status()
+        if state == "ESTOP":
+            lv, ja, en = "stop", "非常停止（PCから再起動が必要）", "E-STOP - restart from PC"
+        elif state == "STALE_HOLD":
+            lv, ja, en = "warn", "通信待ち（データが戻れば再開）", "WAITING FOR PICO DATA"
+        elif state == "PAUSED":
+            lv, ja, en = "idle", "一時停止中（右Aで開始）", "PAUSED - press A"
+        elif state == "RETURNING":
+            lv, ja, en = "wait", "最初の姿勢に戻り中", "RETURNING TO START"
+        elif state == "FOLLOW":
+            lv, ja, en = "ok", "追従中", "FOLLOWING"
+        elif b is None:
+            lv, ja, en = "warn", "ブリッジ待ち", "WAITING FOR BRIDGE"
+        elif b.get("state") == "RAMP_UP":
+            left = float(b.get("ramp_left", 0.0))
+            lv, ja, en = "wait", f"準備中 あと{left:.1f}秒（そのあと握れば動く）", f"GET READY {left:.1f} s"
+        elif b.get("state") == "TRACK":
+            lv, ja, en = "ready", "握れば動きます", "READY - hold grip"
+        else:
+            lv, ja, en = "wait", "ブリッジ準備中", "BRIDGE " + str(b.get("state"))
+        if drill_out:
+            ja, en = ja + " ／ ドリルON", en + " / DRILL ON"
+        return {"t": now, "level": lv, "ja": ja, "en": en, "ik": state,
+                "bridge": b.get("state") if b else None, "weight": b.get("weight") if b else None,
+                "reason": estop_reason or (b.get("reason", "") if b else ""), "drill": int(bool(drill_out))}
+
     def publish(now, drill_out, trig):
         if rds is None:
             return
         rds.set("arm_ik_q", json.dumps({"t": now, "active": active, "follow": follow, "estop": estop,
                                         "estop_reason": estop_reason, "names": ALL_NAMES, "q": q14}))
         rds.set("drill_cmd", json.dumps({"t": now, "on": int(drill_out), "trigger": trig}))
-        state = "ESTOP" if estop else ("FOLLOW" if follow else ("ENABLED" if active else "PAUSED"))
+        state = ik_state()
         rds.hset("teleop_state", "ik", json.dumps({"t": now, "state": state, "reason": estop_reason}))
+        rds.set("teleop_display", json.dumps(display(state, drill_out, now), ensure_ascii=False))
 
     def trip(t, reason):
-        nonlocal estop, estop_reason, active, follow, returning
+        nonlocal estop, estop_reason, active, follow, returning, stale_holding
         if not estop:
             estop, estop_reason = True, reason
-            active = follow = returning = False
+            active = follow = returning = stale_holding = False
             print(f"[{t:6.1f}s] EMERGENCY STOP: {reason}")
 
     try:
@@ -470,20 +563,39 @@ def main():
             d = source.read(t)
 
             # Data freshness.
+            now_w = time.time()
             if d["stamp"] != last_stamp:
-                last_stamp, last_stamp_change = d["stamp"], time.time()
-            stale = (time.time() - last_stamp_change) > STALE_S or d["head"] is None or d["right"] is None
+                last_stamp, last_stamp_change = d["stamp"], now_w
+            pose_missing = d["head"] is None or d["right"] is None
+            stale = (now_w - last_stamp_change) > STALE_S or pose_missing
+            if stale and missing_since is None:
+                missing_since = now_w if pose_missing else last_stamp_change
+            gap_s = (now_w - missing_since) if missing_since is not None else 0.0   # length of the current gap
+            if not stale:
+                missing_since = None
+            stale_s = gap_s if stale else 0.0
 
             # Emergency stops (latched).
             if d["X"] or d["Y"]:
                 trip(t, "left X/Y pressed")
             if stale and active:
-                trip(t, "PICO data missing > 0.3 s")
+                if follow:   # the arms were following the hands: stop at once
+                    trip(t, f"PICO data missing > {STALE_S} s while following")
+                elif stale_s > args.stale_hold:
+                    trip(t, f"PICO data missing > {args.stale_hold} s")
+                elif not stale_holding:
+                    stale_holding = True
+                    print(f"[{t:6.1f}s] PICO data gap while not following -> arms hold, resumes when data is back")
+            if stale_holding and (not stale or not active):
+                stale_holding = False
+                if active and not estop:
+                    print(f"[{t:6.1f}s] PICO data back after {gap_s:.2f} s -> ENABLED (hold the grip to move)")
             if rds is not None and rds.exists("teleop_stop"):
                 trip(t, "stop command (teleop_stop)")
 
-            # A: enable (start pose = measured arm angles) / pause. B: glide back to the start pose, then pause.
-            # Ignored after an emergency stop.
+            # A: enable (start pose = measured arm angles) / pause. Return button (right stick press by default):
+            # glide back to the start pose, then pause. B is left to Remote Vision. Ignored after an emergency stop.
+            ret_now = bool(d.get(args.return_button, False)) if args.return_button != "none" else False
             if not estop:
                 if d["A"] and not prev["A"]:
                     if stale:
@@ -512,13 +624,15 @@ def main():
                             col = (f"collision margin {cl[1] * 100:.1f} cm (closest arm-body gap now {cl[0] * 100:.1f} cm)"
                                    if cl else "collision avoidance off")
                             print(f"[{t:6.1f}s] A -> ENABLED, start pose = {src} angles, {col}; hold the right grip to move")
-                if d["B"] and not prev["B"] and active:
+                if ret_now and not prev["ret"] and active:
                     follow, returning = False, True
                     reset_collision_margin()
                     for s in sides:
                         set_target(s, *default_pose[s])
-                    print(f"[{t:6.1f}s] B -> gliding back to the start pose, then pause")
-            prev["A"], prev["B"] = d["A"], d["B"]
+                    print(f"[{t:6.1f}s] {args.return_button} -> gliding back to the start pose, then pause")
+                if d["B"] and not prev["B"] and args.return_button != "B":
+                    print(f"[{t:6.1f}s] B pressed (Remote Vision eye switch) -> no teleop action")
+            prev["A"], prev["B"], prev["ret"] = d["A"], d["B"], ret_now
 
             # Dead-man on the right grip (hysteresis). Each new grip re-anchors the clutch: no jump.
             if grip_on and d["grip"] < 0.4:
@@ -634,7 +748,8 @@ def main():
                          + [f"{v:.4f}" for v in q14] + [f"{v:.4f}" for v in hands] + [f"{v:.4f}" for v in ctrl]
                          + [f"{d.get('lgrip', 0.0):.2f}", f"{d.get('ltrig', 0.0):.2f}"]
                          + [int(d.get(k, False)) for k in ("lmenu", "rmenu", "lclick", "rclick")]
-                         + [f"{v:.2f}" for v in (list(d.get("laxis", [0.0, 0.0]))[:2] + list(d.get("raxis", [0.0, 0.0]))[:2])])
+                         + [f"{v:.2f}" for v in (list(d.get("laxis", [0.0, 0.0]))[:2] + list(d.get("raxis", [0.0, 0.0]))[:2])]
+                         + [ik_state(), f"{stale_s * 1000:.0f}"])
 
             if args.selftest and args.scenario == "none":
                 for name, t0, t1 in SyntheticSource.PHASES:
