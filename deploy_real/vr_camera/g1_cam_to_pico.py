@@ -414,6 +414,7 @@ class Stream(object):
             last_sent = 0
             last_bytes = 0
             cpu0 = os.times()
+            warned_nosrc = False
             while not self.stop_event.is_set():
                 err = self.enc.poll_bus(0)
                 if err:
@@ -435,6 +436,9 @@ class Stream(object):
                     self.sent += 1
                     self.sent_bytes += len(data)
                 now = time.time()
+                if not warned_nosrc and not self.enc.src_caps_logged and now - t0 > 3:
+                    log("注意: 映像の元から 3 秒たっても 1 枚も届いていません (黒い画面になります)")
+                    warned_nosrc = True
                 if now - last >= self.args.stats_sec:
                     cpu1 = os.times()
                     dt = now - last
@@ -589,7 +593,14 @@ def selftest(args):
             i += 3
         else:
             i += 1
-    log("自己テスト結果: %s" % (err or "OK"))
+    if err:
+        result = "NG (%s)" % err
+    elif stats["n"] == 0 or not enc.src_caps_logged:
+        # 左右並びの合成 (compositor) は入力が無くても黒い画面を出すことがあるので、映像の元を直接見る
+        result = "NG (映像の元から 1 枚も届いていません)"
+    else:
+        result = "OK"
+    log("自己テスト結果: %s" % result)
     log("  %.1f 秒, %d フレーム (%.1f fps), キーフレーム %d, %.0f kbps, CPU %.0f%%" % (
         dt, stats["n"], stats["n"] / dt, stats["key"], stats["bytes"] * 8 / dt / 1000, cpu))
     log("  先頭フレームの NAL 種類 %s (7=SPS 8=PPS 5=IDR が並べば PICO で再生できる形)" % nal_types)
