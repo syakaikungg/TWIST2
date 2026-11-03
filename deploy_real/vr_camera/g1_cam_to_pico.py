@@ -21,6 +21,7 @@ G1 頭カメラ (RealSense D435i RGB) → PICO (XRoboToolkit の XRobot アプ�
   multicast : Unitree の videohub_pc4 が出している H.264 RTP マルチキャスト (既定 230.1.1.1:1720) を
               受けてデコードし直す。2026-11-03 の G1 では何も流れておらず使えなかった。
   test      : テスト模様 (videotestsrc)。カメラなしで PICO までの経路を確かめる用。
+  sim       : シミュレーターの G1 の頭カメラ目線。sim_head_cam.py (127.0.0.1:5601) が描いた絵を受け取る。
 
 ホストの python3 (gi / GStreamer 1.16 + NVIDIA プラグイン) で動かす。conda の gmr 環境ではない。
 
@@ -153,6 +154,13 @@ def build_pipeline_desc(args, out_w, out_h, bitrate, hevc):
                "caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H264\" ! "
                "rtpjitterbuffer latency=%d drop-on-latency=true ! rtph264depay ! h264parse ! %s ! "
                % (args.mcast_group, args.mcast_port, iface, args.jitter_ms, dec))
+    elif args.source == "sim":
+        # sim_head_cam.py から受け取る RGBA の生フレーム (SimFeeder が appsrc に押し込む)
+        src = ("appsrc name=rawsrc is-live=true format=time do-timestamp=true block=false "
+               "caps=video/x-raw,format=RGBA,width=%d,height=%d,framerate=%d/1 ! "
+               % (args.cam_width, args.cam_height, args.cam_fps))
+        if args.encoder != "nv":
+            src += "videoconvert ! "
     else:  # test
         src = ("videotestsrc is-live=true pattern=%s ! "
                "video/x-raw,format=I420,width=%d,height=%d,framerate=%d/1 ! "
@@ -224,12 +232,88 @@ def build_pipeline_desc(args, out_w, out_h, bitrate, hevc):
     return src + body + enc + sink, sbs, eye_w, eye_h
 
 
+class SimFeeder(object):
+    """sim_head_cam.py (127.0.0.1:5601) から RGBA フレームを受け取り appsrc に渡す"""
+    MAGIC = b"G1RAW1"
+
+    def __init__(self, addr):
+        host, port = addr.rsplit(":", 1)
+        try:
+            self.sock = socket.create_connection((host, int(port)), timeout=3)
+        except OSError as e:
+            raise RuntimeError("シムの頭カメラ描画 (sim_head_cam.py, %s) につながりません: %s" % (addr, e))
+        self.sock.settimeout(3)
+        hdr = self._recv_exact(len(self.MAGIC) + 16)
+        if hdr[:len(self.MAGIC)] != self.MAGIC:
+            raise RuntimeError("sim_head_cam.py からの返事が想定と違います: %r" % hdr[:8])
+        self.width, self.height, self.fps, fmt = struct.unpack("<IIII", hdr[len(self.MAGIC):])
+        self.frame_size = self.width * self.height * 4
+        self.stop_event = threading.Event()
+        self.thread = None
+        self.appsrc = None
+        self.pushed = 0
+        self.skipped = 0
+        log("シム描画につながりました %dx%d %dfps" % (self.width, self.height, self.fps))
+
+    def _recv_exact(self, n, buf=None):
+        if buf is None:
+            buf = bytearray(n)
+        view = memoryview(buf)
+        got = 0
+        while got < n:
+            k = self.sock.recv_into(view[got:], n - got)
+            if k == 0:
+                raise ConnectionError("sim_head_cam.py との接続が切れました")
+            got += k
+        return buf
+
+    def start(self, appsrc):
+        self.appsrc = appsrc
+        self.thread = threading.Thread(target=self._run, name="simfeed", daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        buf = bytearray(self.frame_size)
+        try:
+            while not self.stop_event.is_set():
+                self._recv_exact(self.frame_size, buf)
+                # 下流が詰まっているときは古い絵を溜めずに捨てる (遅れを増やさない)
+                if self.appsrc.get_property("current-level-bytes") > 2 * self.frame_size:
+                    self.skipped += 1
+                    continue
+                self.appsrc.emit("push-buffer", Gst.Buffer.new_wrapped(bytes(buf)))
+                self.pushed += 1
+        except Exception as e:
+            if not self.stop_event.is_set():
+                log("シム描画からの受信が止まりました: %s" % e)
+        finally:
+            try:
+                self.appsrc.emit("end-of-stream")
+            except Exception:
+                pass
+
+    def stop(self):
+        self.stop_event.set()
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        self.sock.close()
+        if self.thread:
+            self.thread.join(timeout=3)
+
+
 class Encoder(object):
     """パイプラインを動かし、エンコード済みフレームを on_frame(bytes, is_key) に渡す"""
 
     def __init__(self, args, out_w, out_h, bitrate, hevc, on_frame):
         self.args = args
         self.on_frame = on_frame
+        self.feeder = None
+        if args.source == "sim":
+            self.feeder = SimFeeder(args.sim_addr)
+            args.cam_width, args.cam_height, args.cam_fps = (
+                self.feeder.width, self.feeder.height, self.feeder.fps)
         desc, sbs, eye_w, eye_h = build_pipeline_desc(args, out_w, out_h, bitrate, hevc)
         log("pipeline: %s" % desc)
         log("出力 %dx%d (%s, 片目 %dx%d), %d kbps, %s" % (
@@ -284,6 +368,8 @@ class Encoder(object):
         r = self.pipeline.set_state(Gst.State.PLAYING)
         if r == Gst.StateChangeReturn.FAILURE:
             raise RuntimeError("パイプラインを開始できません (カメラが使用中か、要素が足りない可能性)")
+        if self.feeder:
+            self.feeder.start(self.pipeline.get_by_name("rawsrc"))
 
     def poll_bus(self, timeout_ms=100):
         """エラー/EOS なら文字列を返す"""
@@ -309,6 +395,8 @@ class Encoder(object):
         return "eos"
 
     def stop(self):
+        if self.feeder:
+            self.feeder.stop()
         try:
             self.pipeline.set_state(Gst.State.NULL)
             self.pipeline.get_state(3 * Gst.SECOND)
@@ -616,7 +704,8 @@ def parse_size(s):
 def main():
     p = argparse.ArgumentParser(description="G1 カメラ → PICO XRobot アプリ 映像送信")
     p.add_argument("--listen", default="0.0.0.0:13579", help="待ち受け (既定 0.0.0.0:13579)")
-    p.add_argument("--source", choices=["v4l2", "multicast", "test"], default="v4l2")
+    p.add_argument("--source", choices=["v4l2", "multicast", "test", "sim"], default="v4l2")
+    p.add_argument("--sim-addr", default="127.0.0.1:5601", help="sim_head_cam.py の待ち受け (--source sim)")
     p.add_argument("--device", default="/dev/video4", help="v4l2 のデバイス (D435i RGB = /dev/video4)")
     p.add_argument("--cam-size", default="1280x720", help="カメラ側の解像度 (v4l2/test)")
     p.add_argument("--cam-fps", type=int, default=30)
@@ -657,6 +746,8 @@ def main():
         need += ["udpsrc", "rtph264depay", "nvv4l2decoder" if args.encoder == "nv" else "avdec_h264"]
     elif args.source == "v4l2":
         need += ["v4l2src"]
+    elif args.source == "sim":
+        need += ["appsrc"]
     missing = [n for n in need if not has_element(n)]
     if missing:
         log("GStreamer の要素が足りません: %s" % missing)

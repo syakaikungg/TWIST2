@@ -2,11 +2,17 @@
 # =============================================================================
 # G1 カメラ → PICO 映像送信の起動・停止 (G1 内蔵PC 上で実行する)
 #
-#   bash cam_to_pico.sh start [multicast|v4l2|test] [g1_cam_to_pico.py の追加引数...]
+#   bash cam_to_pico.sh start [v4l2|test|sim|multicast] [g1_cam_to_pico.py の追加引数...]
 #   bash cam_to_pico.sh stop
 #   bash cam_to_pico.sh status
 #   bash cam_to_pico.sh log
 #   bash cam_to_pico.sh selftest [multicast|v4l2|test] [秒数] [追加引数...]
+#
+# シミュレーターの頭カメラ目線を送るとき (腕シムが Redis sim_qpos を書いている間):
+#   bash cam_to_pico.sh simcam start      # 描画 (gmr 環境, GPU/EGL)。127.0.0.1:5601 で待つ
+#   bash cam_to_pico.sh start sim --listen 192.168.123.164:13579
+#   bash cam_to_pico.sh simcam bench 60   # 描画の重さだけ測る
+#   bash cam_to_pico.sh simcam png        # 1 枚描いて /tmp/sim_head.png に保存
 #
 # 映像の元:
 #   v4l2 (既定)      : /dev/video4 を直接開く。先に videohub_pc4 を止める必要がある (README 参照)。
@@ -21,6 +27,10 @@ PY="${PY:-/usr/bin/python3}"   # ホストの python3 (gi + NVIDIA の GStreamer
 APP="$DIR/g1_cam_to_pico.py"
 LOGDIR="$DIR/logs"
 mkdir -p "$LOGDIR"
+# シムの頭カメラ描画 (sim_head_cam.py) は gmr 環境の python (mujoco, redis) で動かす
+GMR_PY="${GMR_PY:-$HOME/miniforge3/envs/gmr/bin/python}"
+SIM_MODEL="${SIM_MODEL:-$HOME/nextech/TWIST2/assets/g1/g1_sim2sim_29dof.xml}"
+SIMPAT='^[^ ]*python[0-9.]* (-u )?[^ ]*sim_head_cam\.py'
 # 行頭が python の本体プロセスだけに当てる (ssh や bash -c の文字列に名前が入っていても誤検出しない)
 PAT='^[^ ]*python[0-9.]* (-u )?[^ ]*g1_cam_to_pico\.py'
 
@@ -67,8 +77,48 @@ case "$cmd" in
     [ $# -gt 0 ] && shift
     "$PY" -u "$APP" --source "$src" --selftest "$secs" "$@"
     ;;
+  simcam)
+    # シミュレーターの頭カメラ目線の描画 (start sim と組み合わせる)
+    sub="${1:-status}"
+    [ $# -gt 0 ] && shift
+    case "$sub" in
+      start)
+        if pgrep -f "$SIMPAT" > /dev/null; then
+          echo "すでに動いています:"; pgrep -af "$SIMPAT"; exit 0
+        fi
+        log="$LOGDIR/simcam_$(date +%Y%m%d_%H%M%S).log"
+        MUJOCO_GL=egl nohup "$GMR_PY" -u "$DIR/sim_head_cam.py" --model "$SIM_MODEL" "$@" > "$log" 2>&1 &
+        ln -sf "$log" "$LOGDIR/latest_simcam.log"
+        sleep 3
+        tail -n 5 "$log"
+        echo "ログ: $log"
+        ;;
+      stop)
+        if pkill -INT -f "$SIMPAT"; then
+          sleep 2
+          pgrep -f "$SIMPAT" > /dev/null && pkill -KILL -f "$SIMPAT"
+          echo "止めました"
+        else
+          echo "動いていません"
+        fi
+        ;;
+      status)
+        pgrep -af "$SIMPAT" || echo "動いていません"
+        [ -e "$LOGDIR/latest_simcam.log" ] && tail -n 5 "$LOGDIR/latest_simcam.log"
+        ;;
+      bench)
+        MUJOCO_GL=egl "$GMR_PY" -u "$DIR/sim_head_cam.py" --model "$SIM_MODEL" --bench "${1:-60}" "${@:2}"
+        ;;
+      png)
+        MUJOCO_GL=egl "$GMR_PY" -u "$DIR/sim_head_cam.py" --model "$SIM_MODEL" --png "${1:-/tmp/sim_head.png}" "${@:2}"
+        ;;
+      *)
+        echo "simcam start|stop|status|bench [枚数]|png [保存先]"; exit 1
+        ;;
+    esac
+    ;;
   *)
-    sed -n 2,18p "$0"
+    sed -n 2,24p "$0"
     exit 1
     ;;
 esac

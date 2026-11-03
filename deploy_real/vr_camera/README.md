@@ -13,6 +13,7 @@ G1 の頭の RealSense D435i (RGB) の映像を、PICO の XRobot アプリ (XRo
 | `g1_cam_to_pico.py` | 本体。TCP 13579 で PICO を待ち、要求に合わせて H.264 を送る |
 | `cam_to_pico.sh` | G1 上での起動・停止・状態・自己テスト |
 | `fake_pico_client.py` | PICO の代わりに要求を送って受信を数えるテスト用クライアント |
+| `sim_head_cam.py` | シミュレーターの G1 の頭カメラ目線を GPU で描き、`--source sim` に渡す |
 
 ## 仕組み
 
@@ -69,6 +70,27 @@ bash cam_to_pico.sh stop
 ```
 
 sudo は不要 (unitree ユーザーで実行できた)。`/dev/video4` も unitree ユーザーで開ける。
+
+## シミュレーターの頭カメラ目線を送る (sim2sim)
+
+腕のシミュレーター (`~/nextech/arm_ik/arm_sim.py`) が Redis の `sim_qpos` (JSON、`joints` に関節名→角度) を
+50Hz で書いている間、その関節角を読んで (書き込みはしない) G1 の頭カメラ目線を描き、PICO に送る。
+
+- カメラは Unitree の URDF の `d435_joint` と同じ位置・向き (torso_link から (0.0576, 0.0175, 0.4299)、下向き 0.831 rad)、縦の画角 42°。
+- 頭の殻のメッシュ (`head_link` / `logo_link`) は視界をふさぐので描かない。影と反射も切って軽くしている。
+- 描画は gmr 環境の python + MuJoCo の EGL (GPU)。エンコードは実機カメラと同じハードウェア H.264。
+
+```bash
+bash cam_to_pico.sh simcam bench 60     # 描画の重さを測る (1 枚あたり ms)
+bash cam_to_pico.sh simcam png          # 1 枚描いて /tmp/sim_head.png に保存して見え方を確認
+bash cam_to_pico.sh simcam start        # 描画を 127.0.0.1:5601 で待たせる
+bash cam_to_pico.sh start sim --listen 192.168.123.164:13579
+# PICO: Remote Vision → ZEDMINI → Listen → 192.168.123.164 → Confirm (実機のときと同じ)
+bash cam_to_pico.sh stop; bash cam_to_pico.sh simcam stop
+```
+
+実機カメラ (`start v4l2`) とシム (`start sim`) は、送信サーバーを起動するときに選ぶ (同時には動かせない)。
+描画は送信サーバーがつないでいる間 (PICO が見ている間) だけ行う。
 
 ## 腕テレオペと同時に使うとき
 
