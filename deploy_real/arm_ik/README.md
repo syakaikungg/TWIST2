@@ -8,6 +8,7 @@ NexTech Week 2026 秋の展示用。G1 の内蔵PC（`~/nextech/arm_ik/`）で�
 | `arm_sdk_bridge.py` | Redis `arm_ik_q` → `rt/arm_sdk` の LowCmd。既定はログのみで、`--send` のときだけ送信する。`--sim` は `arm_sim.py` と Redis でつなぐ |
 | `arm_sim.py` | 骨盤と脚を固定した MuJoCo のシミュレーター（腕と腰を arm_sdk と同じ形で動かす）。右手に見た目だけのドリルが付く |
 | `sim_drill.py` | シミュレーターのドリルの形と回し方（ビューアーからも使う） |
+| `sim_viewer.py` | ノートPC（WSL）のビューアー。G1の `stream_sim.py` を SSH で動かして関節角を受け取り、MuJoCo の窓に描く。`sim_drill.py` と同じフォルダ（`~/nextech_viewer/`）に置く |
 | `sim_run.sh` / `sim_live_bg.sh` | シミュレーターでの自動テスト / PICO で操作する live |
 | `run_live.sh` | 実機（`--send`）。本人の確認後にだけ使う |
 | `stop.sh` | 非常停止（Redis `teleop_stop`） |
