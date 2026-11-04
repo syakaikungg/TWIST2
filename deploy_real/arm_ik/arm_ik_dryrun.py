@@ -374,6 +374,10 @@ def main():
                     help="at or above this: glide back to the start pose and pause to cool down, before the "
                          "bridge's emergency stop (--max-temp, 60 C) [C]; 0 = off (default: warning only, "
                          "chosen 2026-11-04)")
+    ap.add_argument("--leg-temp-warn", type=float, default=70.0,
+                    help="hottest leg motor (not commanded by the bridge, the robot's own controller) at or above "
+                         "this: warning on the display only, nothing stops [C]; 0 = off. A leg motor reached 77 C "
+                         "on the real G1 on 2026-11-04 during 5 min of arm teleop")
     ap.add_argument("--temp-resume", type=float, default=55.0,
                     help="after a temperature pause, A is refused until the hottest motor is at or below this [C]")
     ap.add_argument("--stale-hold", type=float, default=2.0,
@@ -601,6 +605,13 @@ def main():
             return 0.0, ""
         return float(b.get("temp", 0.0) or 0.0), str(b.get("temp_joint", "") or "")
 
+    def hot_leg():
+        """(temperature, joint name) of the hottest leg motor, from the bridge's state report; (0, "")."""
+        b = bridge_status()
+        if not b:
+            return 0.0, ""
+        return float(b.get("leg_temp", 0.0) or 0.0), str(b.get("leg_joint", "") or "")
+
     def temp_warn():
         if args.temp_warn > 0:
             return args.temp_warn
@@ -609,7 +620,8 @@ def main():
 
     def joint_ja(name):
         side = "左" if name.startswith("left") else ("右" if name.startswith("right") else "")
-        for key, ja in (("shoulder", "肩"), ("elbow", "肘"), ("wrist", "手首"), ("waist", "腰")):
+        for key, ja in (("shoulder", "肩"), ("elbow", "肘"), ("wrist", "手首"), ("waist", "腰"),
+                        ("hip", "股関節"), ("knee", "膝"), ("ankle", "足首")):
             if key in name:
                 return side + ja
         return name or "モーター"
@@ -655,12 +667,19 @@ def main():
             lv = "warn"
             ja = ja + f" ／ {joint_ja(temp_joint)} {temp_now:.0f}℃ 腕を下ろして休ませて"
             en = en + f" / HOT {temp_now:.0f} C"
+        leg_now, leg_joint = hot_leg()
+        if args.leg_temp_warn > 0 and leg_now >= args.leg_temp_warn and lv != "stop":
+            # the legs are the robot's own: nothing stops on this, the operator decides to rest
+            lv = "warn"
+            ja = ja + f" ／ 脚 {joint_ja(leg_joint)} {leg_now:.0f}℃ 休ませて"
+            en = en + f" / LEG HOT {leg_now:.0f} C"
         if drill_out:
             ja, en = ja + " ／ ドリルON", en + " / DRILL ON"
         return {"t": now, "level": lv, "ja": ja, "en": en, "ik": state,
                 "bridge": b.get("state") if b else None, "weight": b.get("weight") if b else None,
                 "reason": estop_reason or (b.get("reason", "") if b else ""), "drill": int(bool(drill_out)),
-                "temp": round(temp_now, 1), "temp_joint": temp_joint}
+                "temp": round(temp_now, 1), "temp_joint": temp_joint,
+                "leg_temp": round(leg_now, 1), "leg_joint": leg_joint}
 
     def publish(now, drill_out, trig):
         if rds is None:

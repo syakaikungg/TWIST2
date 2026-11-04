@@ -9,8 +9,9 @@
 # tool: what the IK's collision avoidance puts on the right wrist: hand (the hand is still on, default until the
 # drill adapter is mounted) or drill (the provisional drill shape of sim_drill.py).
 # The waist is brought slowly to 0 (upright) in roll and pitch from right A on (bridge default --waist-level).
-# Motor temperature limit of the bridge: MAX_TEMP (default 60 C; e.g. MAX_TEMP=65 bash run_live.sh send). A motor
-# the bridge commands at MAX_TEMP - 5 shows a warning on the PICO; at MAX_TEMP the bridge stops (3 s release).
+# Motor temperature limit of the bridge: MAX_TEMP (default 65 C since 2026-11-04, was 60; e.g. MAX_TEMP=60 bash
+# run_live.sh send). A motor the bridge commands at MAX_TEMP - 5 shows a warning on the PICO; above MAX_TEMP the
+# bridge stops (3 s release). A leg motor (the robot's own) at 70 C or more only shows a warning.
 # Stop the arms at any time: left X/Y on the PICO or ~/nextech/arm_ik/stop.sh (arm_sdk weight -> 0 in 3 s: arms and
 # waist go back to the robot's own controller; the legs are never commanded). The remote's L2+B is whole-body
 # damping (the robot goes limp): last resort only, with the robot hanging on its rope.
@@ -22,7 +23,7 @@ case "$MODE" in
 esac
 VEL=${2:-0.5}
 TOOL=${4:-hand}
-MAX_TEMP=${MAX_TEMP:-60}
+MAX_TEMP=${MAX_TEMP:-65}
 case "$MAX_TEMP" in 5[0-9]|6[0-5]) ;; *) echo "MAX_TEMP must be 50..65"; exit 1 ;; esac
 case "$TOOL" in hand|drill) ;; *) echo "tool must be hand or drill"; exit 1 ;; esac
 cd ~/nextech/arm_ik || exit 1

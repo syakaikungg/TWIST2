@@ -24,7 +24,9 @@ TWIST2's 150/4 (chosen 2026-11-03), and --waist-correct (roll,pitch by default) 
 sag to the waist target while in TRACK (integral correction, limited in size and rate); it starts from 0 and
 eases back to 0 on pause, return-to-start and emergency stop. --waist-level-rate sets the leveling speed.
 The state report (Redis teleop_state/bridge) includes ramp_left, the seconds left in RAMP_UP, and the hottest
-commanded motor (temp, temp_joint) for the operator display and the IK's temperature pause.
+commanded motor (temp, temp_joint) for the operator display and the IK's temperature pause, and the hottest
+leg motor (leg_temp, leg_joint) for a display warning only (the legs are the robot's own; a leg motor reached
+77 C on the real G1 on 2026-11-04 while the arms were teleoperated).
 The emergency-stop ramp is 3 s (was 1 s until 2026-11-04): the command is frozen and the robot's own controller
 takes the arms back over that time; with 1 s the arms swung back at up to 1.5 rad/s on the real G1.
 The CSV also logs the pelvis IMU (rt/lowstate imu_state rpy), to tell a pelvis tilt from a waist tilt.
@@ -53,6 +55,13 @@ WAIST_IDX = [12, 13, 14]
 WEIGHT_IDX = 29  # kNotUsedJoint: its q is the arm_sdk weight (1 = arm_sdk, 0 = built-in controller)
 JOINT_IDX = ARM_IDX + WAIST_IDX
 JOINT_NAMES = ARM_NAMES + WAIST_NAMES
+# Legs (motors 0-11): never commanded here (the robot's own controller keeps them), only their temperature is read.
+LEG_NAMES = [
+    "left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint", "left_knee_joint",
+    "left_ankle_pitch_joint", "left_ankle_roll_joint",
+    "right_hip_pitch_joint", "right_hip_roll_joint", "right_hip_yaw_joint", "right_knee_joint",
+    "right_ankle_pitch_joint", "right_ankle_roll_joint",
+]
 # Limits from GMR's g1_mocap_29dof.xml, shrunk by a margin.
 LIMITS = {
     "left_shoulder_pitch_joint": (-3.089, 1.149), "left_shoulder_roll_joint": (-0.6, 2.252),
@@ -149,7 +158,8 @@ def main():
 
     # rt/lowstate arrives at ~1 kHz: the callback only keeps the latest message; the 50 Hz loop decodes it.
     state = {"msg": None, "q": None, "tau": None, "temp": None, "temp_cmd_max": 0.0, "temp_cmd_id": -1,
-             "temp_all_max": 0.0, "temp_all_id": -1, "t": 0.0, "n": 0, "rpy": None}
+             "temp_all_max": 0.0, "temp_all_id": -1, "temp_leg_max": 0.0, "temp_leg_id": -1,
+             "t": 0.0, "n": 0, "rpy": None}
     publisher = None
 
     def decode_state():
@@ -162,13 +172,18 @@ def main():
                 state["q"] = np.array([by[n] for n in JOINT_NAMES])
                 state["tau"] = np.array([bt[n] for n in JOINT_NAMES])
                 state["temp"] = np.full(len(JOINT_NAMES), 30.0)
+                leg = np.full(len(LEG_NAMES), 30.0)
                 raw_t = rds.get("sim_temp")   # test hook: {"joint": name, "temp": C} sets one motor's temperature
                 if raw_t:
                     ft = json.loads(raw_t)
                     if ft.get("joint") in JOINT_NAMES:
                         state["temp"][JOINT_NAMES.index(ft["joint"])] = float(ft["temp"])
+                    elif ft.get("joint") in LEG_NAMES:
+                        leg[LEG_NAMES.index(ft["joint"])] = float(ft["temp"])
                 k = int(np.argmax(state["temp"]))
                 state["temp_cmd_max"], state["temp_cmd_id"] = float(state["temp"][k]), JOINT_IDX[k]
+                k = int(np.argmax(leg))
+                state["temp_leg_max"], state["temp_leg_id"] = float(leg[k]), k
                 state["t"] = float(s["t"])
                 state["n"] += 1
             return
@@ -184,6 +199,8 @@ def main():
         temps = [max(ms[i].temperature) for i in range(29)]
         k = int(np.argmax(temps))
         state["temp_all_max"], state["temp_all_id"] = float(temps[k]), k
+        k = int(np.argmax(temps[:len(LEG_NAMES)]))
+        state["temp_leg_max"], state["temp_leg_id"] = float(temps[k]), k
         try:
             state["rpy"] = np.array([float(v) for v in msg.imu_state.rpy])   # pelvis IMU, log only
         except (AttributeError, TypeError):
@@ -274,7 +291,10 @@ def main():
                                                         "temp": round(state["temp_cmd_max"], 1),
                                                         "temp_joint": JOINT_NAMES[JOINT_IDX.index(k)]
                                                         if k in JOINT_IDX else "",
-                                                        "max_temp": args.max_temp}))
+                                                        "max_temp": args.max_temp,
+                                                        "leg_temp": round(state["temp_leg_max"], 1),
+                                                        "leg_joint": LEG_NAMES[state["temp_leg_id"]]
+                                                        if 0 <= state["temp_leg_id"] < len(LEG_NAMES) else ""}))
 
     def estop(t, why):
         nonlocal mode, reason
