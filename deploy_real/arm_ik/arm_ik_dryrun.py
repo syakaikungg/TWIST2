@@ -243,6 +243,20 @@ class SyntheticSource:
             d["grip"] = 1.0 if 4.5 <= t < 13.5 else 0.0
             d["trigger"] = 1.0 if 7.5 <= t < 9.5 else 0.0
             ret = 14.0 <= t < 14.1
+        elif sc == "temp_pause":   # with a temperature fed in by a test script: warn, pause, A refused, A again
+            sway = 0.08 * math.sin(2 * math.pi * max(0.0, t - 4.0) / 3.0)
+            off, loff = np.array([0.0, 0.0, -sway]), np.array([0.0, 0.0, sway])
+            d["grip"] = 1.0 if 4.5 <= t < 27.0 else 0.0
+            d["A"] = (1.0 <= t < 1.1) or (18.0 <= t < 18.1) or (22.0 <= t < 22.1)
+        elif sc in ("estop_reach", "pause_reach"):   # both hands fully forward, then X (or A) while extended
+            a = float(np.clip((t - 5.0) / 2.0, 0, 1))
+            off = a * (np.array([0.19, 1.35, -0.55]) - np.array([0.25, 1.1, -0.35]))
+            loff = a * (np.array([-0.19, 1.35, -0.55]) - np.array([-0.25, 1.1, -0.35]))
+            d["grip"] = 1.0 if 4.5 <= t < 9.0 else 0.0
+            if sc == "estop_reach":
+                d["X"] = 9.0 <= t < 9.1
+            else:
+                d["A"] = (1.0 <= t < 1.1) or (9.0 <= t < 9.1)
         elif sc == "per_arm":
             sway = 0.08 * math.sin(2 * math.pi * max(0.0, t - 4.0) / 3.0)
             off, loff = np.array([0.0, 0.0, -sway]), np.array([0.0, 0.0, sway])
@@ -353,6 +367,15 @@ def main():
                          "B is also Remote Vision's one-eye/both-eyes switch.")
     ap.add_argument("--grip-mode", choices=["per_arm", "right"], default="per_arm",
                     help="per_arm: each grip moves its own arm (default); right: the right grip moves both arms")
+    ap.add_argument("--temp-warn", type=float, default=0.0,
+                    help="hottest motor the bridge commands (arms, waist) at or above this: warning on the display "
+                         "[C]; 0 = 5 C below the bridge's --max-temp (55 C with the default 60 C)")
+    ap.add_argument("--temp-pause", type=float, default=0.0,
+                    help="at or above this: glide back to the start pose and pause to cool down, before the "
+                         "bridge's emergency stop (--max-temp, 60 C) [C]; 0 = off (default: warning only, "
+                         "chosen 2026-11-04)")
+    ap.add_argument("--temp-resume", type=float, default=55.0,
+                    help="after a temperature pause, A is refused until the hottest motor is at or below this [C]")
     ap.add_argument("--stale-hold", type=float, default=2.0,
                     help="PICO data gap tolerated while enabled but not following: the arms hold and teleop "
                          "resumes when the data is back; longer -> emergency stop [s]. While following: 0.3 s.")
@@ -361,7 +384,8 @@ def main():
     ap.add_argument("--selftest", action="store_true", help="synthetic inputs, no PICO, no Redis")
     ap.add_argument("--scenario", default="none",
                     choices=["none", "deadman", "estop_x", "pico_stale", "hold", "sim_suite", "reach_fwd",
-                             "buttons", "stale_hold", "per_arm", "drill_cross"])
+                             "buttons", "stale_hold", "per_arm", "drill_cross", "estop_reach", "pause_reach",
+                             "temp_pause"])
     ap.add_argument("--selftest-redis", action="store_true", help="with --selftest: still write to Redis")
     ap.add_argument("--log-dir", default=str(Path.home() / "nextech_setup" / "logs"))
     args = ap.parse_args()
@@ -369,7 +393,8 @@ def main():
         args.no_redis = args.no_redis or not args.selftest_redis
         args.duration = args.duration or {"none": 16.0, "hold": 12.0, "sim_suite": 24.0, "reach_fwd": 17.0,
                                           "buttons": 12.0, "stale_hold": 12.0, "per_arm": 16.0,
-                                          "drill_cross": 14.0}.get(args.scenario, 9.0)
+                                          "drill_cross": 14.0, "estop_reach": 15.0,
+                                          "pause_reach": 15.0, "temp_pause": 28.0}.get(args.scenario, 9.0)
 
     def on_sigterm(signum, frame):
         raise StopRequested("SIGTERM")
@@ -530,6 +555,7 @@ def main():
 
     active = follow = drill = returning = False
     stale_holding = False          # data gap while enabled but not following: hold, resume when it is back
+    cooling = False                # paused by --temp-pause: A waits for --temp-resume
     missing_since = None           # when the PICO data went bad (frozen stamp or missing pose)
     estop, estop_reason = False, ""
     prev = {"A": False, "B": False, "ret": False, "grip": False}
@@ -568,10 +594,31 @@ def main():
             return "RETURNING"
         return "FOLLOW" if follow else "ENABLED"
 
+    def hot_motor():
+        """(temperature, joint name) of the hottest motor the bridge commands, from its state report; (0, "")."""
+        b = bridge_status()
+        if not b:
+            return 0.0, ""
+        return float(b.get("temp", 0.0) or 0.0), str(b.get("temp_joint", "") or "")
+
+    def temp_warn():
+        if args.temp_warn > 0:
+            return args.temp_warn
+        b = bridge_status()
+        return float(b.get("max_temp", 60.0) if b else 60.0) - 5.0
+
+    def joint_ja(name):
+        side = "左" if name.startswith("left") else ("右" if name.startswith("right") else "")
+        for key, ja in (("shoulder", "肩"), ("elbow", "肘"), ("wrist", "手首"), ("waist", "腰")):
+            if key in name:
+                return side + ja
+        return name or "モーター"
+
     def display(state, drill_out, now):
         """One line for the operator (PICO video overlay): what the arms do now and what to press.
         level: stop / warn / wait / idle / ready / ok."""
         b = bridge_status()
+        temp_now, temp_joint = hot_motor()
         if state == "ESTOP":
             lv, ja, en = "stop", "非常停止（PCから再起動が必要）", "E-STOP - restart from PC"
         elif b is not None and b.get("state") in ("ESTOP_RAMP", "STOPPED"):
@@ -580,8 +627,14 @@ def main():
             lv, ja, en = "stop", "非常停止（ブリッジ・PCから再起動が必要）", "E-STOP (bridge) - restart from PC"
         elif state == "STALE_HOLD":
             lv, ja, en = "warn", "通信待ち（データが戻れば再開）", "WAITING FOR PICO DATA"
+        elif state == "PAUSED" and cooling and round(temp_now) > args.temp_resume:
+            lv, ja, en = ("warn", f"冷却中 {joint_ja(temp_joint)} {temp_now:.0f}℃（{args.temp_resume:.0f}℃以下で右A）",
+                          f"COOLING {temp_now:.0f} C - A at {args.temp_resume:.0f} C")
         elif state == "PAUSED":
             lv, ja, en = "idle", "一時停止中（右Aで開始）", "PAUSED - press A"
+        elif state == "RETURNING" and cooling:
+            lv, ja, en = ("warn", f"熱いので最初の姿勢に戻り中（{joint_ja(temp_joint)} {temp_now:.0f}℃）",
+                          f"HOT {temp_now:.0f} C - RETURNING TO START")
         elif state == "RETURNING":
             lv, ja, en = "wait", "最初の姿勢に戻り中", "RETURNING TO START"
         elif state == "FOLLOW":
@@ -598,11 +651,16 @@ def main():
             lv, ja, en = "ready", "握れば動きます", "READY - hold grip"
         else:
             lv, ja, en = "wait", "ブリッジ準備中", "BRIDGE " + str(b.get("state"))
+        if state in ("FOLLOW", "ENABLED") and lv in ("ok", "ready") and temp_now >= temp_warn():
+            lv = "warn"
+            ja = ja + f" ／ {joint_ja(temp_joint)} {temp_now:.0f}℃ 腕を下ろして休ませて"
+            en = en + f" / HOT {temp_now:.0f} C"
         if drill_out:
             ja, en = ja + " ／ ドリルON", en + " / DRILL ON"
         return {"t": now, "level": lv, "ja": ja, "en": en, "ik": state,
                 "bridge": b.get("state") if b else None, "weight": b.get("weight") if b else None,
-                "reason": estop_reason or (b.get("reason", "") if b else ""), "drill": int(bool(drill_out))}
+                "reason": estop_reason or (b.get("reason", "") if b else ""), "drill": int(bool(drill_out)),
+                "temp": round(temp_now, 1), "temp_joint": temp_joint}
 
     def publish(now, drill_out, trig):
         if rds is None:
@@ -662,6 +720,19 @@ def main():
             if rds is not None and rds.exists("teleop_stop"):
                 trip(t, "stop command (teleop_stop)")
 
+            # Temperature: the hottest motor the bridge commands at --temp-pause -> glide back, then pause to
+            # cool down (the bridge's own emergency stop at --max-temp would release the arms abruptly).
+            temp_now, temp_joint = hot_motor() if rds is not None else (0.0, "")
+            if (args.temp_pause > 0 and active and not estop and not returning
+                    and temp_now >= args.temp_pause):
+                follow, returning, cooling = False, True, True
+                follow_s.update({s: False for s in follow_s})
+                reset_collision_margin()
+                for s in sides:
+                    set_target(s, *default_pose[s])
+                print(f"[{t:6.1f}s] {temp_joint} at {temp_now:.0f} C (>= {args.temp_pause:.0f}) -> gliding back to "
+                      f"the start pose, then pause to cool down (A again at <= {args.temp_resume:.0f} C)")
+
             # A: enable (start pose = measured arm angles) / pause. Return button (right stick press by default):
             # glide back to the start pose, then pause. B is left to Remote Vision. Ignored after an emergency stop.
             ret_now = bool(d.get(args.return_button, False)) if args.return_button != "none" else False
@@ -669,6 +740,9 @@ def main():
                 if d["A"] and not prev["A"]:
                     if stale:
                         print(f"[{t:6.1f}s] A pressed but PICO data is stale -> ignored")
+                    elif not active and cooling and round(temp_now) > args.temp_resume:
+                        print(f"[{t:6.1f}s] A ignored: {temp_joint} still at {temp_now:.0f} C "
+                              f"(cooling down to {args.temp_resume:.0f} C)")
                     elif active:
                         active, returning, follow = False, False, False
                         follow_s.update({s: False for s in follow_s})
@@ -678,6 +752,9 @@ def main():
                         if meas is None and rds is not None:
                             print(f"[{t:6.1f}s] A ignored: no fresh arm_state (is arm_sdk_bridge.py running?)")
                         else:
+                            if cooling:
+                                print(f"[{t:6.1f}s] cooled down ({temp_joint} {temp_now:.0f} C)")
+                            cooling = False
                             if meas is not None:
                                 home_q = np.clip(np.array([meas[n] for n in names]), jlo, jhi)
                                 fixed_out = {n: meas[n] for n in ALL_NAMES if n not in names}

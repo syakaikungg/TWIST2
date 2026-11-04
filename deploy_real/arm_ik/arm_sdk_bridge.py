@@ -17,11 +17,17 @@ EMERGENCY STOP (weight ->0 over --estop-ramp s, drill forced OFF, then STOPPED u
 Commands are clamped to the joint limits and rate-limited to --max-vel rad/s.
 The measured arm angles are written to Redis `arm_state` every loop; the IK program takes them as its
 start pose when A is pressed, so the arms do not move until the grip is held. The waist is held at the
-angles measured when RAMP_UP starts (the official example drives it to 0 instead). Waist gains default to
+angles measured when RAMP_UP starts (the official example drives it to 0 instead), then --waist-level brings
+roll and pitch slowly to 0 while in TRACK (the robot's own standing pose leans ~6 deg forward, which costs
+waist torque and heat; the IK model also assumes waist 0). Waist gains default to
 TWIST2's 150/4 (chosen 2026-11-03), and --waist-correct (roll,pitch by default) slowly adds the measured waist
 sag to the waist target while in TRACK (integral correction, limited in size and rate); it starts from 0 and
-eases back to 0 on pause, return-to-start and emergency stop. The state report (Redis teleop_state/bridge)
-includes ramp_left, the seconds left in RAMP_UP, for the operator display.
+eases back to 0 on pause, return-to-start and emergency stop. --waist-level-rate sets the leveling speed.
+The state report (Redis teleop_state/bridge) includes ramp_left, the seconds left in RAMP_UP, and the hottest
+commanded motor (temp, temp_joint) for the operator display and the IK's temperature pause.
+The emergency-stop ramp is 3 s (was 1 s until 2026-11-04): the command is frozen and the robot's own controller
+takes the arms back over that time; with 1 s the arms swung back at up to 1.5 rad/s on the real G1.
+The CSV also logs the pelvis IMU (rt/lowstate imu_state rpy), to tell a pelvis tilt from a waist tilt.
 """
 import argparse
 import csv
@@ -92,10 +98,14 @@ def main():
     ap.add_argument("--waist-ki", type=float, default=1.0, help="waist correction gain [1/s]")
     ap.add_argument("--waist-corr-max", type=float, default=0.15, help="waist correction limit [rad]")
     ap.add_argument("--waist-corr-rate", type=float, default=0.1, help="waist correction change limit [rad/s]")
+    ap.add_argument("--waist-level", default="roll,pitch",
+                    help="in TRACK, bring these waist joints slowly to 0 (upright) instead of holding the start "
+                         "angle (\"\" = hold the start angle, as before 2026-11-04)")
+    ap.add_argument("--waist-level-rate", type=float, default=0.03, help="--waist-level speed [rad/s]")
     ap.add_argument("--max-vel", type=float, default=1.0, help="command rate limit [rad/s]")
     ap.add_argument("--ramp-up", type=float, default=3.0, help="weight 0->1 time [s]")
     ap.add_argument("--ramp-down", type=float, default=2.0, help="weight 1->0 time on pause [s]")
-    ap.add_argument("--estop-ramp", type=float, default=1.0, help="weight ->0 time on emergency stop [s]")
+    ap.add_argument("--estop-ramp", type=float, default=3.0, help="weight ->0 time on emergency stop [s]")
     ap.add_argument("--stale", type=float, default=0.3, help="arm_ik_q older than this while engaged -> stop [s]")
     ap.add_argument("--max-track-err", type=float, default=0.3, help="|command - measured| limit [rad]")
     ap.add_argument("--track-err-time", type=float, default=0.5, help="how long the limit may be exceeded [s]")
@@ -120,6 +130,10 @@ def main():
     if set(corr_joints) - {"yaw", "roll", "pitch"}:
         ap.error("--waist-correct takes yaw, roll, pitch")
     corr_mask = np.array([n.split("_")[1] in corr_joints for n in WAIST_NAMES])
+    level_joints = [j for j in args.waist_level.split(",") if j]
+    if set(level_joints) - {"yaw", "roll", "pitch"}:
+        ap.error("--waist-level takes yaw, roll, pitch")
+    level_mask = np.array([n.split("_")[1] in level_joints for n in WAIST_NAMES])
     KP = np.array([kp] * len(ARM_IDX) + wkp)     # per joint, JOINT_IDX order
     KD = np.array([kd] * len(ARM_IDX) + wkd)
     rds = redis.Redis(host=args.redis_host, port=6379)
@@ -135,7 +149,7 @@ def main():
 
     # rt/lowstate arrives at ~1 kHz: the callback only keeps the latest message; the 50 Hz loop decodes it.
     state = {"msg": None, "q": None, "tau": None, "temp": None, "temp_cmd_max": 0.0, "temp_cmd_id": -1,
-             "temp_all_max": 0.0, "temp_all_id": -1, "t": 0.0, "n": 0}
+             "temp_all_max": 0.0, "temp_all_id": -1, "t": 0.0, "n": 0, "rpy": None}
     publisher = None
 
     def decode_state():
@@ -148,6 +162,13 @@ def main():
                 state["q"] = np.array([by[n] for n in JOINT_NAMES])
                 state["tau"] = np.array([bt[n] for n in JOINT_NAMES])
                 state["temp"] = np.full(len(JOINT_NAMES), 30.0)
+                raw_t = rds.get("sim_temp")   # test hook: {"joint": name, "temp": C} sets one motor's temperature
+                if raw_t:
+                    ft = json.loads(raw_t)
+                    if ft.get("joint") in JOINT_NAMES:
+                        state["temp"][JOINT_NAMES.index(ft["joint"])] = float(ft["temp"])
+                k = int(np.argmax(state["temp"]))
+                state["temp_cmd_max"], state["temp_cmd_id"] = float(state["temp"][k]), JOINT_IDX[k]
                 state["t"] = float(s["t"])
                 state["n"] += 1
             return
@@ -163,6 +184,10 @@ def main():
         temps = [max(ms[i].temperature) for i in range(29)]
         k = int(np.argmax(temps))
         state["temp_all_max"], state["temp_all_id"] = float(temps[k]), k
+        try:
+            state["rpy"] = np.array([float(v) for v in msg.imu_state.rpy])   # pelvis IMU, log only
+        except (AttributeError, TypeError):
+            state["rpy"] = None
 
     if args.sim:
         t0 = time.time()
@@ -221,11 +246,14 @@ def main():
                   "track_err", "temp_max", "temp_max_id", "lowstate_age_ms"]
                  + ["tgt_" + n for n in JOINT_NAMES] + ["cmd_" + n for n in JOINT_NAMES]
                  + ["meas_" + n for n in JOINT_NAMES] + ["tau_" + n for n in JOINT_NAMES]
-                 + ["temp_" + n for n in JOINT_NAMES] + ["wcorr_" + n for n in WAIST_NAMES])
+                 + ["temp_" + n for n in JOINT_NAMES] + ["wcorr_" + n for n in WAIST_NAMES]
+                 + ["imu_roll", "imu_pitch", "imu_yaw"] + ["whold_" + n for n in WAIST_NAMES])
     print("monitors: track_err>{} rad for {}s, motor temp>{} C, lowstate silent>0.2 s".format(
         args.max_track_err, args.track_err_time, args.max_temp))
     print("waist correction: {}".format("off" if not corr_mask.any() else "{} ki={} max={} rad rate={} rad/s".format(
         ",".join(corr_joints), args.waist_ki, args.waist_corr_max, args.waist_corr_rate)))
+    print("waist target: {}".format("hold the start angles" if not level_mask.any() else
+                                    "{} to 0 at {} rad/s in TRACK".format(",".join(level_joints), args.waist_level_rate)))
     print("arms kp={} kd={}, waist kp={} kd={}, max_vel={} rad/s ramp_up={}s ramp_down={}s estop_ramp={}s stale={}s log={}".format(
         kp, kd, wkp, wkd, args.max_vel, args.ramp_up, args.ramp_down, args.estop_ramp, args.stale, log_path))
 
@@ -239,9 +267,14 @@ def main():
 
     def report(now):
         ramp_left = (1.0 - weight) * args.ramp_up if mode == "RAMP_UP" else 0.0   # for the operator display
+        k = state["temp_cmd_id"]
         rds.hset("teleop_state", "bridge", json.dumps({"t": now, "state": mode, "weight": round(weight, 3),
                                                         "ramp_left": round(ramp_left, 2), "reason": reason,
-                                                        "send": bool(args.send), "sim": bool(args.sim)}))
+                                                        "send": bool(args.send), "sim": bool(args.sim),
+                                                        "temp": round(state["temp_cmd_max"], 1),
+                                                        "temp_joint": JOINT_NAMES[JOINT_IDX.index(k)]
+                                                        if k in JOINT_IDX else "",
+                                                        "max_temp": args.max_temp}))
 
     def estop(t, why):
         nonlocal mode, reason
@@ -332,6 +365,13 @@ def main():
                     mode = "STOPPED"
                     print("[{:6.1f}s] STOPPED (weight 0, built-in controller). Restart from the PC to resume.".format(t))
 
+            # --waist-level: in TRACK the held waist angle walks to 0 (upright on the pelvis) on the chosen joints.
+            if level_mask.any() and mode == "TRACK" and waist_hold is not None:
+                lstep = args.waist_level_rate * dt
+                waist_hold = np.where(level_mask, waist_hold + np.clip(-waist_hold, -lstep, lstep), waist_hold)
+                if target is not None:
+                    target[14:] = waist_hold
+
             # Integral waist correction: in TRACK the shortfall (held - measured) is slowly added to the waist
             # target, within --waist-corr-max and --waist-corr-rate; in every other state it eases back to 0.
             if corr_mask.any():
@@ -393,7 +433,9 @@ def main():
                           "{:.0f}".format(ls_age)]
                          + ["{:.4f}".format(v) for v in tg] + ["{:.4f}".format(v) for v in qc]
                          + ["{:.4f}".format(v) for v in meas] + ["{:.2f}".format(v) for v in tau]
-                         + ["{:.0f}".format(v) for v in temp] + ["{:.4f}".format(v) for v in wcorr])
+                         + ["{:.0f}".format(v) for v in temp] + ["{:.4f}".format(v) for v in wcorr]
+                         + (["{:.4f}".format(v) for v in state["rpy"]] if state["rpy"] is not None else ["nan"] * 3)
+                         + (["{:.4f}".format(v) for v in waist_hold] if waist_hold is not None else ["nan"] * 3))
 
             if leaving and mode == "STOPPED":
                 break
