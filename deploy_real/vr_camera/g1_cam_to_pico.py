@@ -126,7 +126,8 @@ def crop_box(src_w, src_h, dst_w, dst_h):
     """src を dst の縦横比に合わせて中央で切り取る範囲 (left, top, right, bottom)"""
     src_ar = src_w / float(src_h)
     dst_ar = dst_w / float(dst_h)
-    if abs(src_ar - dst_ar) < 1e-3:
+    # 848x480 (1.767) と 16:9 (1.778) のような 2% 未満の差は、切らずにわずかに引き伸ばす
+    if abs(src_ar - dst_ar) / dst_ar < 0.02:
         return None
     if src_ar > dst_ar:  # 横が余る
         w = int(round(src_h * dst_ar)) // 2 * 2
@@ -176,7 +177,10 @@ def build_pipeline_desc(args, out_w, out_h, bitrate, hevc):
     if args.encoder == "nv":
         conv = "nvvidconv name=scaler"   # 拡大縮小の方法 (interpolation-method) は作ったあとに設定する
         if crop:
-            conv += " left=%d top=%d right=%d bottom=%d" % crop
+            # 普通のメモリの絵を nvvidconv で直接切り取ると CPU が重くなった (11/4 の G1: 640x480 と 848x480 で
+            # 1 コアの 55〜68%、切らない 960x540 は 25%)。先に GPU 側 (NVMM) に移してから切り取る。
+            conv = ("nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! "
+                    "nvvidconv name=scaler left=%d top=%d right=%d bottom=%d" % crop)
     else:
         conv = "videoconvert ! videoscale"
         if crop:
