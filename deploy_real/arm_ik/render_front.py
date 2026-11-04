@@ -11,6 +11,12 @@ Afterwards (no Redis, no robot I/O; only reads the file):
     python render_front.py rec.jsonl out.mp4 [--view front|back|left|right|drill] [--fps 30]
                            [--width 1280 --height 720] [--start S --end S] [--max-gap 1.0]
 
+Without a recording, arm_sim.py's own log of the run works too (joint angles and contacts at 50 Hz). It has
+no drill state, so give the IK's log of the same run for that (its `drill` column, replayed with the same
+spin-up and coast as the simulator):
+
+    python render_front.py arm_sim_live_..._HHMMSS.csv out.mp4 --drill-csv arm_ik_..._HHMMSS.csv
+
 The model is the viewers' one (pelvis and legs welded, the drill on the right wrist from sim_drill.py when it
 is next to this file). Bodies in contact turn red, the drill spins and its rings turn green while ON, as in
 sim_viewer.py. Joint angles are held between samples (sim_qpos comes at 50 Hz). Pauses longer than --max-gap
@@ -20,6 +26,7 @@ Offscreen rendering needs an OpenGL backend: MUJOCO_GL=egl (default here, works 
 Encoding: the `ffmpeg` on PATH or imageio-ffmpeg's copy (libx264), else GStreamer's nvv4l2h264enc (Jetson).
 """
 import argparse
+import csv
 import json
 import os
 import shutil
@@ -53,7 +60,7 @@ JOINT_NAMES = [
 ]
 # lookat, distance, azimuth, elevation. The robot faces +x: azimuth 180 looks at its front.
 VIEWS = {
-    "front": ([0.15, 0.0, 0.85], 1.7, 180.0, -8.0),
+    "front": ([0.15, 0.0, 0.92], 1.5, 180.0, -8.0),
     "back": ([0.25, 0.0, 1.0], 1.8, 0.0, -25.0),        # same as sim_viewer.py (the operator's view)
     "left": ([0.15, 0.0, 0.95], 2.0, 270.0, -10.0),     # from the robot's left side
     "right": ([0.15, 0.0, 0.95], 2.0, 90.0, -10.0),     # from the robot's right side (drill side)
@@ -91,7 +98,47 @@ def build_model(xml, drill, width, height):
     return m
 
 
+def load_sim_csv(path):
+    """arm_sim.py's log -> the same (t, msg) samples as a recording (wall time, joints, contacts)."""
+    msgs = []
+    bad = 0
+    with open(path, newline="") as f:
+        for r in csv.DictReader(f):
+            try:
+                joints = {k[2:]: float(v) for k, v in r.items() if k.startswith("q_")}
+                pairs = [p.split("|") for p in (r.get("contact_pairs") or "").split(";") if "|" in p]
+                msgs.append((float(r["wall"]), {"t": float(r["wall"]), "joints": joints, "contacts": pairs}))
+            except Exception:
+                bad += 1
+    return msgs, bad
+
+
+def add_drill_from_ik_csv(msgs, path, rps):
+    """Fill each sample's "drill" from the IK log's drill column (wall time), replaying the spin."""
+    on_t, on_v = [], []
+    with open(path, newline="") as f:
+        for r in csv.DictReader(f):
+            try:
+                on_t.append(float(r["wall"]))
+                on_v.append(int(float(r["drill"])))
+            except Exception:
+                pass
+    on_t, on_v = np.array(on_t), np.array(on_v)
+    spin = sim_drill.DrillSpin(rps=rps)
+    prev = None
+    n_on = 0
+    for t, msg in msgs:
+        k = np.searchsorted(on_t, t, side="right") - 1
+        on = bool(on_v[k]) if k >= 0 and t - on_t[k] < 0.3 else False
+        msg["drill"] = spin.update(on, 0.0 if prev is None else min(t - prev, 0.1))
+        prev = t
+        n_on += on
+    return n_on
+
+
 def load_recording(path):
+    if path.endswith(".csv"):
+        return load_sim_csv(path)
     msgs = []
     bad = 0
     with open(path) as f:
@@ -141,6 +188,8 @@ def main():
     ap.add_argument("--start", type=float, default=0.0, help="seconds from the first sample")
     ap.add_argument("--end", type=float, default=0.0, help="seconds from the first sample (0 = to the end)")
     ap.add_argument("--max-gap", type=float, default=1.0, help="shorten pauses longer than this [s]")
+    ap.add_argument("--drill-csv", default="", help="the IK's log of the run (for an arm_sim CSV input)")
+    ap.add_argument("--drill-rps", type=float, default=3.0)
     ap.add_argument("--model", default="")
     ap.add_argument("--no-drill", action="store_true")
     ap.add_argument("--shadows", action="store_true")
@@ -149,6 +198,9 @@ def main():
     msgs, bad = load_recording(args.recording)
     if not msgs:
         raise SystemExit("no samples in %s" % args.recording)
+    if args.drill_csv and sim_drill is not None:
+        n_on = add_drill_from_ik_csv(msgs, args.drill_csv, args.drill_rps)
+        print(f"drill: ON in {n_on} of {len(msgs)} samples (from {os.path.basename(args.drill_csv)})", flush=True)
     t0 = msgs[0][0]
     span = msgs[-1][0] - t0
     print(f"recording: {len(msgs)} samples over {span:.1f} s ({bad} unreadable lines)", flush=True)
