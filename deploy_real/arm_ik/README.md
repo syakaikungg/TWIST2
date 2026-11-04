@@ -16,6 +16,8 @@ NexTech Week 2026 秋の展示用。G1 の内蔵PC（`~/nextech/arm_ik/`）で�
 | `g1.sh` | 操作用のPC（Ubuntu、またはノートPCの WSL）で使う。`g1.sh up`（= after_boot.sh）、`g1.sh dry\|send [速さ] [秒] [tool]`（= run_live.sh）、`g1.sh stop`（= stop.sh）、`g1.sh status`、`g1.sh ssh` を SSH で G1 に頼むだけ |
 | `render_front.py` | 記録（`stream_sim.py` の出力）か arm_sim の CSV から、前などから見た動画を作る（G1 では EGL＋imageio-ffmpeg） |
 | `check_tool_gap.py` | IK か arm_sim のログから、ドリル（か手）が体と反対の腕にどこまで近づいたかを出す |
+| `compare_replay.py` | 同じ入力の2回の IK の CSV（`--replay` の新旧など）で、追従中の手の位置の差を出す |
+| `csv_to_input.py` | 入力を記録する前（11/4 まで）の IK の CSV とテキストのログから、おおよその入力の記録を作る（頭の向きは握った瞬間の値だけ、コントローラーの向きは無し） |
 | そのほか | 解析やテスト用の小さなスクリプト |
 
 ## 操作用のPC
@@ -31,6 +33,10 @@ NexTech Week 2026 秋の展示用。G1 の内蔵PC（`~/nextech/arm_ik/`）で�
 - G1 の電源を入れたら：`bash g1.sh up`（sudo のパスワードを1回）→ PICO の XRobot → Remote Vision → ZEDMINI → Listen → `192.168.123.164` → Confirm
 - 腕を動かす：`bash g1.sh send 0.5 300`（ロボットに送る。止めるのは PICO の左 X、または別の端末で `bash g1.sh stop`）
 - 送らずに試す：`bash g1.sh dry`
+
+## 入力の記録と再生
+
+IK は、PICO からの入力（頭と両手の位置と向き、ボタン、グリップ、トリガー、データの時刻）を、CSV の隣の `*_input.jsonl` に毎回書く（約20 kB/秒、`--no-record-input` で止める）。`--replay その.jsonl` で、同じ入力をそのときの時刻どおりに IK に流せる（PICO と Redis は使わない、ロボットには何も送らない）。設定を変えて2回流し、`compare_replay.py A.csv B.csv` で手の位置の差を見る。例：今の設定と、11/4 までの計算（`--heading per_arm --neck-back 0 --neck-down 0`）。同じ設定で流すと、元の自己テストと差は0.0 cm だった。11/4 までの記録は `csv_to_input.py` でおおよその入力に直せる（前の向きの比べ方には使えるが、首の位置の推定は頭の傾きが無いので比べられない）。
 
 ## 操作（PICO）
 

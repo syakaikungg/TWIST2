@@ -96,6 +96,13 @@ def head_yaw(R_head):
     return math.atan2(fwd[1], fwd[0])
 
 
+def pose_list(p):
+    """(pos, rotmat) -> [x, y, z, qx, qy, qz, qw] (PICO axes) for the input record; None stays None."""
+    if p is None:
+        return None
+    return [round(float(v), 5) for v in list(p[0]) + list(R.from_matrix(p[1]).as_quat())]
+
+
 def head_pitch_down(R_head):
     """How far the headset looks down (positive) or up, in robot axes [rad]."""
     fwd = (M @ R_head @ M.T) @ np.array([1.0, 0.0, 0.0])
@@ -170,6 +177,33 @@ class SdkSource:
 
     def close(self):
         self.xr.close()
+
+
+class ReplaySource:
+    """Inputs recorded by an earlier run (the *_input.jsonl next to its CSV), played back at the recorded times:
+    read(t) gives the latest record at or before t. Same timestamps, so data gaps and stops replay too."""
+
+    def __init__(self, path):
+        self.rows = []
+        with open(path) as f:
+            for line in f:
+                r = json.loads(line)
+                d = r["d"]
+                for k in ("head", "left", "right"):
+                    d[k] = pose7(d[k]) if d.get(k) is not None else None
+                self.rows.append((float(r["t"]), d))
+        if not self.rows:
+            raise SystemExit(f"no records in {path}")
+        self.i = 0
+        self.end = self.rows[-1][0]
+
+    def read(self, t):
+        while self.i + 1 < len(self.rows) and self.rows[self.i + 1][0] <= t:
+            self.i += 1
+        return self.rows[self.i][1]
+
+    def close(self):
+        pass
 
 
 class SyntheticSource:
@@ -421,11 +455,20 @@ def main():
                     choices=["none", "deadman", "estop_x", "pico_stale", "hold", "sim_suite", "reach_fwd",
                              "buttons", "stale_hold", "per_arm", "drill_cross", "estop_reach", "pause_reach",
                              "temp_pause", "turn"])
-    ap.add_argument("--selftest-redis", action="store_true", help="with --selftest: still write to Redis")
+    ap.add_argument("--selftest-redis", action="store_true", help="with --selftest or --replay: still use Redis")
+    ap.add_argument("--replay", default="",
+                    help="inputs from a record of an earlier run (*_input.jsonl) instead of the PICO, at the "
+                         "recorded times; no Redis unless --selftest-redis. Compare two replays with "
+                         "compare_replay.py (e.g. --heading per_arm --neck-back 0 --neck-down 0 = before 2026-11-05)")
+    ap.add_argument("--log-tag", default="", help="added to the log file names (to tell two runs of the same second apart)")
+    ap.add_argument("--no-record-input", action="store_true",
+                    help="do not write the raw PICO inputs (head and controller poses with orientation, buttons) "
+                         "to *_input.jsonl next to the CSV (about 20 kB/s), which --replay plays back")
     ap.add_argument("--log-dir", default=str(Path.home() / "nextech_setup" / "logs"))
     args = ap.parse_args()
-    if args.selftest:
+    if args.selftest or args.replay:
         args.no_redis = args.no_redis or not args.selftest_redis
+    if args.selftest:
         args.duration = args.duration or {"none": 16.0, "hold": 12.0, "sim_suite": 24.0, "reach_fwd": 17.0,
                                           "buttons": 12.0, "stale_hold": 12.0, "per_arm": 16.0,
                                           "drill_cross": 14.0, "estop_reach": 15.0,
@@ -549,7 +592,22 @@ def main():
     rds = None if args.no_redis else __import__("redis").Redis(host=args.redis_host, port=6379)
     if rds is not None and rds.delete("teleop_stop"):
         print("cleared an old teleop_stop flag (restart from the PC = reset)")
-    source = SyntheticSource(args.scenario, args.return_button) if args.selftest else SdkSource()
+    if args.selftest:
+        source = SyntheticSource(args.scenario, args.return_button)
+    elif args.replay:
+        source = ReplaySource(args.replay)
+        args.duration = args.duration or source.end + 0.5
+        print(f"replaying {args.replay} ({source.end:.1f} s, {len(source.rows)} records)")
+    else:
+        source = SdkSource()
+    rec = None
+
+    def record(t, d):
+        if rec is None:
+            return
+        out = {k: (pose_list(v) if k in ("head", "left", "right") else v) for k, v in d.items()}
+        rec.write(json.dumps({"t": round(t, 4), "d": out},
+                             default=lambda o: o.item() if hasattr(o, "item") else str(o)) + "\n")
 
     def bridge_status():
         """The bridge's latest state report (Redis teleop_state/bridge) if fresh, else None."""
@@ -577,8 +635,13 @@ def main():
         return dict(zip(msg["names"], msg["q"]))
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
-    tag = "selftest_" + args.scenario if args.selftest else "live"
+    tag = "selftest_" + args.scenario if args.selftest else ("replay" if args.replay else "live")
+    tag += ("_" + args.log_tag) if args.log_tag else ""
     log_path = log_dir / f"arm_ik_{tag}_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+    if not args.no_record_input:
+        rec_path = log_path.with_name(log_path.stem + "_input.jsonl")
+        rec = open(rec_path, "w")
+        print(f"input record: {rec_path}")
     logf = open(log_path, "w", newline="")
     log = csv.writer(logf)
     log.writerow(["t", "wall", "active", "follow", "estop", "drill", "trigger", "grip", "stale", "ik_ms", "loop_ms",
@@ -740,6 +803,7 @@ def main():
             if args.duration and t > args.duration:
                 break
             d = source.read(t)
+            record(t, d)
 
             # Data freshness.
             now_w = time.time()
@@ -1012,6 +1076,8 @@ def main():
             publish(time.time(), False, 0.0)
         source.close()
         logf.close()
+        if rec is not None:
+            rec.close()
 
     ik, lp = np.array(ik_times), np.array(loop_times)
     print(f"timing over {len(lp)} loops: ik avg {ik.mean():.2f} ms / max {ik.max():.2f} ms, "
