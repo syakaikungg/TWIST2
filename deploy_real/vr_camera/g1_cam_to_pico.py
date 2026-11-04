@@ -29,10 +29,12 @@ G1 頭カメラ (RealSense D435i RGB) → PICO (XRoboToolkit の XRobot アプ�
   # ネットワークなしの自己テスト (5 秒エンコードして /tmp に保存)
   python3 g1_cam_to_pico.py --source test --selftest 5 --size 2560x720
   # PICO 待ち受け
-  python3 g1_cam_to_pico.py --source v4l2 --device /dev/video4 --listen 192.168.123.164:13579
+  python3 g1_cam_to_pico.py --source v4l2 --cam-size 960x540 --listen 192.168.123.164:13579
 """
 
 import argparse
+import fcntl
+import glob
 import os
 import queue
 import signal
@@ -122,6 +124,75 @@ def has_element(name):
     return Gst.ElementFactory.find(name) is not None
 
 
+# --- v4l2 のデバイスを探す (USB がリセットされると /dev/video* の番号が変わるため) ---
+_VIDIOC_QUERYCAP = 0x80685600            # _IOR('V', 0, struct v4l2_capability[104])
+_VIDIOC_ENUM_FMT = 0xC0405602            # _IOWR('V', 2, struct v4l2_fmtdesc[64])
+_VIDIOC_ENUM_FRAMESIZES = 0xC02C564A     # _IOWR('V', 74, struct v4l2_frmsizeenum[44])
+_V4L2_CAP_VIDEO_CAPTURE = 0x00000001
+_V4L2_CAP_DEVICE_CAPS = 0x80000000
+_FOURCC_YUYV = 0x56595559
+
+
+def _v4l2_info(path):
+    """(カード名, YUYV で出せる大きさの集合) を返す。映像を取れないノードは None"""
+    fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+    try:
+        cap = bytearray(104)
+        fcntl.ioctl(fd, _VIDIOC_QUERYCAP, cap)
+        card = bytes(cap[16:48]).split(b"\0")[0].decode("utf-8", "replace")
+        caps, dcaps = struct.unpack_from("<II", cap, 84)
+        if not ((dcaps if caps & _V4L2_CAP_DEVICE_CAPS else caps) & _V4L2_CAP_VIDEO_CAPTURE):
+            return None
+        fourccs = []
+        for i in range(64):
+            fd_buf = bytearray(64)
+            struct.pack_into("<II", fd_buf, 0, i, 1)   # index, type=VIDEO_CAPTURE
+            try:
+                fcntl.ioctl(fd, _VIDIOC_ENUM_FMT, fd_buf)
+            except OSError:
+                break
+            fourccs.append(struct.unpack_from("<I", fd_buf, 44)[0])
+        if _FOURCC_YUYV not in fourccs:
+            return card, set()
+        sizes = set()
+        for i in range(64):
+            fs = bytearray(44)
+            struct.pack_into("<II", fs, 0, i, _FOURCC_YUYV)
+            try:
+                fcntl.ioctl(fd, _VIDIOC_ENUM_FRAMESIZES, fs)
+            except OSError:
+                break
+            if struct.unpack_from("<I", fs, 8)[0] == 1:   # DISCRETE
+                sizes.add(struct.unpack_from("<II", fs, 12))
+        return card, sizes
+    finally:
+        os.close(fd)
+
+
+def find_v4l2_device(want, width, height, card_hint="RealSense"):
+    """--device auto のとき、カード名に card_hint を含み YUYV で width x height を出せるノードを探す"""
+    if want != "auto":
+        return want
+    found = []
+    for path in sorted(glob.glob("/dev/video*"), key=lambda p: int("0" + "".join(c for c in p if c.isdigit()))):
+        try:
+            info = _v4l2_info(path)
+        except OSError:
+            continue
+        if info and info[1]:
+            found.append((path, info[0], info[1]))
+    for path, card, sizes in found:
+        if card_hint.lower() in card.lower() and (width, height) in sizes:
+            return path
+    for path, card, sizes in found:
+        if card_hint.lower() in card.lower():
+            log("注意: %s (%s) は %dx%d を出せないようです (出せる大きさ: %s)" % (
+                path, card, width, height, sorted(sizes)))
+            return path
+    raise RuntimeError("YUYV を出せる %s のカメラが見つかりません (見つかったもの: %s)" % (
+        card_hint, [(p, c) for p, c, _ in found] or "なし"))
+
+
 def crop_box(src_w, src_h, dst_w, dst_h):
     """src を dst の縦横比に合わせて中央で切り取る範囲 (left, top, right, bottom)"""
     src_ar = src_w / float(src_h)
@@ -147,9 +218,12 @@ def build_pipeline_desc(args, out_w, out_h, bitrate, hevc):
 
     # --- 映像の元 ---
     if args.source == "v4l2":
+        dev = find_v4l2_device(args.device, args.cam_width, args.cam_height, args.device_hint)
+        if dev != args.device:
+            log("カメラ: %s (自動で選択)" % dev)
         src = ("v4l2src device=%s do-timestamp=true ! "
                "video/x-raw,format=YUY2,width=%d,height=%d,framerate=%d/1 ! "
-               % (args.device, args.cam_width, args.cam_height, args.cam_fps))
+               % (dev, args.cam_width, args.cam_height, args.cam_fps))
     elif args.source == "multicast":
         iface = ("multicast-iface=%s " % args.mcast_iface) if args.mcast_iface else ""
         dec = "nvv4l2decoder" if args.encoder == "nv" else "avdec_h264"
@@ -751,8 +825,12 @@ def main():
     p.add_argument("--listen", default="0.0.0.0:13579", help="待ち受け (既定 0.0.0.0:13579)")
     p.add_argument("--source", choices=["v4l2", "multicast", "test", "sim"], default="v4l2")
     p.add_argument("--sim-addr", default="127.0.0.1:5601", help="sim_head_cam.py の待ち受け (--source sim)")
-    p.add_argument("--device", default="/dev/video4", help="v4l2 のデバイス (D435i RGB = /dev/video4)")
-    p.add_argument("--cam-size", default="1280x720", help="カメラ側の解像度 (v4l2/test)")
+    p.add_argument("--device", default="auto",
+                   help="v4l2 のデバイス。auto = 配信のたびに RealSense の RGB (YUYV) のノードを探す "
+                        "(USB リセットで /dev/video4 の番号が変わることがあるため)")
+    p.add_argument("--device-hint", default="RealSense", help="--device auto で探すカメラの名前の一部")
+    p.add_argument("--cam-size", default="960x540",
+                   help="カメラ側の解像度 (v4l2/test)。11/4 の G1 は 1280x720 が不安定だったので 960x540 (16:9 で全体が入る)")
     p.add_argument("--cam-fps", type=int, default=30)
     p.add_argument("--mcast-group", default="230.1.1.1")
     p.add_argument("--mcast-port", type=int, default=1720)

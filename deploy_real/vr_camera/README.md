@@ -27,6 +27,32 @@ G1 の頭の RealSense D435i (RGB) の映像を、PICO の XRobot アプリ (XRo
 
 プロトコルは `deploy_real/data_utils/webcam_to_vr.py` と同じ。
 
+## G1 を起動し直したあと
+
+G1 を再起動すると Unitree の映像サービス `video_hub_pc4` が戻ってカメラを使い、USB の省電力の設定も元に戻る。
+`bash cam_to_pico.sh boot` で、`video_hub_pc4` を止めて実機カメラ (960x540) で PICO を待つ (sudo 不要)。
+腕テレオペの `~/nextech/arm_ik/after_boot.sh` (docker start などとまとめて本人が 1 回実行) から呼ぶ。
+
+カメラの USB の省電力を切る設定 (sudo が要る、再起動で戻る)。2026-11-04 にカメラの USB リセットが 1 日 5 回あり、
+毎回直前に `Disable of device-initiated U1/U2 failed` が出ていたため (効果はまだ確認中):
+
+```bash
+echo on | sudo tee /sys/bus/usb/devices/2-2.3/power/control /sys/bus/usb/devices/2-2/power/control
+```
+
+## カメラの解像度
+
+D435i の RGB (`YUYV`) は 320x180〜960x540 (60fps まで)、1280x720・1920x1080 (30fps まで) を出せる。
+
+- 既定は **960x540** (16:9 なので切らずにカメラの全体 約69°×42° が入る、片目 1280x720 へは 1.33 倍)。
+  2026-11-04 の G1 では 1280x720 で 1 枚も来ないことがあり (USB が不安定)、960x540 は安定して出た。
+- 640x480 などの 4:3 は、カメラ自体が左右を切った絵を出したうえに、片目の 16:9 に合わせて上下も切るので、
+  視野が約54°×32° まで狭くなり、2 倍に拡大するので粗くなる。使わない。
+- 切り取りが要るときは、一度 GPU 側 (NVMM) に移してから切る (普通のメモリのまま nvvidconv で切ると CPU が 1 コアの 55〜68% になった)。
+- 拡大の補間は bilinear (`--interp`、nvvidconv の既定の Nearest はブロック状に粗い)。
+- デバイスは `--device auto` (既定) で、PICO がつながるたびに RealSense で YUYV と指定の大きさを出すノードを探す。
+  USB がリセットされると `/dev/video*` の番号が変わることがあるため。
+
 ## 使い方 (G1 上)
 
 ホストの `/usr/bin/python3` を使う (gi と NVIDIA の GStreamer プラグインがあるため)。conda の gmr 環境では動かない。
@@ -35,7 +61,7 @@ G1 の頭の RealSense D435i (RGB) の映像を、PICO の XRobot アプリ (XRo
 cd ~/nextech/cam_to_pico
 bash cam_to_pico.sh selftest test 5          # ネットワークなしでエンコードだけ試す
 bash cam_to_pico.sh selftest v4l2 5          # 頭のカメラで 5 秒エンコードだけ試す (videohub_pc4 を止めてから)
-bash cam_to_pico.sh start v4l2 --listen 192.168.123.164:13579   # PICO を待つ
+bash cam_to_pico.sh start v4l2 --listen 192.168.123.164:13579   # PICO を待つ (960x540、--cam-size で変更)
 bash cam_to_pico.sh status
 bash cam_to_pico.sh stop
 ```
@@ -53,7 +79,7 @@ bash cam_to_pico.sh stop
 | `--source` | 内容 | 注意 |
 |---|---|---|
 | `multicast` | Unitree の `videohub_pc4` が出している H.264 RTP (230.1.1.1:1720) を受けてデコードし直す | 2026-11-03 の G1 では 230.1.1.1:1720 に何も流れておらず使えなかった |
-| `v4l2` (既定) | `/dev/video4` (D435i RGB, YUYV 1280x720 30fps) を直接開く | `videohub_pc4` が `/dev/video4` を使っているので、先に止める必要がある |
+| `v4l2` (既定) | D435i の RGB (YUYV、既定 960x540 30fps) を直接開く。デバイスは自動で探す | `videohub_pc4` が `/dev/video4` を使っているので、先に止める必要がある |
 | `test` | テスト模様 | カメラなしで PICO までの経路確認用 |
 
 `v4l2` を使うときの `videohub_pc4` の停止 (2026-02 の `scripts/start_vr_camera.sh` と同じ方法。システムのサービスなので本人の確認後に):

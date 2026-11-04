@@ -7,6 +7,7 @@
 #   bash cam_to_pico.sh status
 #   bash cam_to_pico.sh log
 #   bash cam_to_pico.sh selftest [multicast|v4l2|test] [秒数] [追加引数...]
+#   bash cam_to_pico.sh boot [追加引数...]   # G1 を起動し直したあとの準備 (videohub_pc4 を止めて実機カメラで待ち受け)
 #
 # シミュレーターの頭カメラ目線を送るとき (腕シムが Redis sim_qpos を書いている間):
 #   bash cam_to_pico.sh simcam start      # 描画 (gmr 環境, GPU/EGL)。127.0.0.1:5601 で待つ
@@ -79,6 +80,27 @@ case "$cmd" in
     [ $# -gt 0 ] && shift
     "$PY" -u "$APP" --source "$src" --selftest "$secs" "$@"
     ;;
+  boot)
+    # G1 を起動し直したあとの準備 (sudo 不要)。G1 を再起動すると Unitree の映像サービス video_hub_pc4 が
+    # 戻ってカメラを使ってしまうので止め、実機カメラ (960x540) で PICO を待つ。
+    # USB の省電力を切る設定は sudo が要るので、起動コマンドの側で先に行う (README 参照)。
+    MSCLI=/unitree/sbin/mscli
+    if [ -x "$MSCLI" ]; then
+      echo "video_hub_pc4 を止めます"
+      "$MSCLI" stopservice video_hub_pc4 || true
+      sleep 2
+      "$MSCLI" listservice 2>/dev/null | grep -E "video_hub_pc4[^_]|video_hub_pc4$" || true
+    else
+      echo "注意: $MSCLI がありません (video_hub_pc4 は止めていません)"
+    fi
+    for d in /sys/bus/usb/devices/2-2.3 /sys/bus/usb/devices/2-2; do
+      [ -e "$d/power/control" ] && echo "USB $(basename $d) $(cat $d/product 2>/dev/null): power/control=$(cat $d/power/control)"
+    done
+    if pgrep -f "$PAT" > /dev/null; then
+      "$0" stop
+    fi
+    "$0" start v4l2 --cam-size 960x540 --listen 192.168.123.164:13579 "$@"
+    ;;
   simcam)
     # シミュレーターの頭カメラ目線の描画 (start sim と組み合わせる)
     sub="${1:-status}"
@@ -120,7 +142,7 @@ case "$cmd" in
     esac
     ;;
   *)
-    sed -n 2,25p "$0"
+    sed -n 2,26p "$0"
     exit 1
     ;;
 esac
