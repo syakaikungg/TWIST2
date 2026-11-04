@@ -8,7 +8,7 @@
 # IK after (seconds - 5) s, bridge after seconds s.
 # tool: what the IK's collision avoidance puts on the right wrist: hand (the hand is still on, default until the
 # drill adapter is mounted) or drill (the provisional drill shape of sim_drill.py).
-# The waist is brought slowly to 0 (upright) in roll and pitch while tracking (bridge default --waist-level).
+# The waist is brought slowly to 0 (upright) in roll and pitch from right A on (bridge default --waist-level).
 # Motor temperature limit of the bridge: MAX_TEMP (default 60 C; e.g. MAX_TEMP=65 bash run_live.sh send). A motor
 # the bridge commands at MAX_TEMP - 5 shows a warning on the PICO; at MAX_TEMP the bridge stops (3 s release).
 # Stop the arms at any time: left X/Y on the PICO or ~/nextech/arm_ik/stop.sh (arm_sdk weight -> 0 in 3 s: arms and
