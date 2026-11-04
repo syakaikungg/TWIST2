@@ -174,7 +174,7 @@ def build_pipeline_desc(args, out_w, out_h, bitrate, hevc):
     if args.aspect == "crop" and args.source != "multicast":
         crop = crop_box(args.cam_width, args.cam_height, eye_w, eye_h)
     if args.encoder == "nv":
-        conv = "nvvidconv"
+        conv = "nvvidconv name=scaler"   # 拡大縮小の方法 (interpolation-method) は作ったあとに設定する
         if crop:
             conv += " left=%d top=%d right=%d bottom=%d" % crop
     else:
@@ -357,6 +357,13 @@ class Encoder(object):
         self.frames = 0
         self.bytes = 0
         self.src_caps_logged = False
+        # nvvidconv の拡大縮小は既定が Nearest (ブロック状に粗くなる) なので変える。無い版なら既定のまま
+        scaler = self.pipeline.get_by_name("scaler")
+        if scaler is not None and args.interp >= 0:
+            try:
+                scaler.set_property("interpolation-method", args.interp)
+            except Exception as e:
+                log("注意: nvvidconv の interpolation-method を %d にできません (%s)。既定のまま" % (args.interp, e))
         self.overlay = None
         el = self.pipeline.get_by_name("ovl")
         if el is not None:
@@ -757,6 +764,8 @@ def main():
     p.add_argument("--sbs-min-width", type=int, default=2000, help="この幅以上なら左右並びにする")
     p.add_argument("--aspect", choices=["crop", "stretch"], default="crop",
                    help="片目の縦横比に合わせて中央を切り取る(crop) か引き伸ばす(stretch)")
+    p.add_argument("--interp", type=int, default=1,
+                   help="nvvidconv の拡大縮小の方法 0=Nearest 1=Bilinear 2=5-Tap 3=10-Tap 4=Smart 5=Nicest (-1 で既定のまま)")
     p.add_argument("--bitrate", type=int, default=0, help="bps。0 なら PICO の要求値")
     p.add_argument("--no-hevc", action="store_true", help="PICO が H.265 を要求しても H.264 で送る")
     p.add_argument("--gop", type=int, default=30, help="キーフレーム間隔 (フレーム数)")
