@@ -10,7 +10,7 @@ NexTech Week 2026 秋の展示用。G1 の内蔵PC（`~/nextech/arm_ik/`）で�
 | `sim_drill.py` | シミュレーターのドリルの形と回し方（ビューアーからも使う） |
 | `sim_viewer.py` | ノートPC（WSL）のビューアー。G1の `stream_sim.py` を SSH で動かして関節角を受け取り、MuJoCo の窓に描く。`sim_drill.py` と同じフォルダ（`~/nextech_viewer/`）に置く |
 | `sim_run.sh` / `sim_live_bg.sh` | シミュレーターでの自動テスト / PICO で操作する live |
-| `run_live.sh` | 実機（`--send`）。本人の確認後にだけ使う |
+| `run_live.sh` | 実機。`run_live.sh dry` はロボットに送らずに動かす（既定60秒）、`run_live.sh send` は `--send` で送る（既定180秒、本人の確認後にだけ使う）。上限は既定0.5 rad/s、手先0.6 m/s |
 | `stop.sh` | 非常停止（Redis `teleop_stop`） |
 | そのほか | 解析やテスト用の小さなスクリプト |
 
