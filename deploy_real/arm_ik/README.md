@@ -12,9 +12,25 @@ NexTech Week 2026 秋の展示用。G1 の内蔵PC（`~/nextech/arm_ik/`）で�
 | `sim_run.sh` / `sim_live_bg.sh` | シミュレーターでの自動テスト / PICO で操作する live |
 | `run_live.sh` | 実機。`run_live.sh dry` はロボットに送らずに動かす（既定60秒）、`run_live.sh send` は `--send` で送る（既定180秒、本人の確認後にだけ使う）。上限は既定0.5 rad/s、手先0.6 m/s。4番目の引数は右手首の当たり判定（`hand` が既定、ドリルを付けたら `drill`）。温度の上限は `MAX_TEMP=60 bash run_live.sh send` のように変えられる（50〜65℃、既定65℃、11/4 に60℃から変更） |
 | `stop.sh` | 非常停止（Redis `teleop_stop`） |
+| `after_boot.sh` | G1 を再起動したあとの準備（Redis と PC Service、頭カメラの USB 省電力オフ、頭カメラ → PICO）。パスワードは1回。ロボットは動かさない |
+| `g1.sh` | 操作用のPC（Ubuntu、またはノートPCの WSL）で使う。`g1.sh up`（= after_boot.sh）、`g1.sh dry\|send [速さ] [秒] [tool]`（= run_live.sh）、`g1.sh stop`（= stop.sh）、`g1.sh status`、`g1.sh ssh` を SSH で G1 に頼むだけ |
 | `render_front.py` | 記録（`stream_sim.py` の出力）か arm_sim の CSV から、前などから見た動画を作る（G1 では EGL＋imageio-ffmpeg） |
 | `check_tool_gap.py` | IK か arm_sim のログから、ドリル（か手）が体と反対の腕にどこまで近づいたかを出す |
 | そのほか | 解析やテスト用の小さなスクリプト |
+
+## 操作用のPC
+
+テレオペはすべて G1 の内蔵PCで動く。操作用のPCは、LAN ケーブルで G1 につなぎ、SSH で起動と停止を頼むだけ。展示会では自宅の Ubuntu PC を使う（11/4 本人）。今のノートPC（Windows）は WSL の Ubuntu から同じことをしている。
+
+新しいPCの準備（1回だけ）
+1. 有線 LAN の IP を固定にする：G1 と LAN ケーブルでつなぎ、設定 → ネットワーク → 有線 → IPv4 を「手動」、アドレス `192.168.123.223`、ネットマスク `255.255.255.0`、ゲートウェイは空。`.164` は G1 の内蔵PC、`.1` は TP-Link ルーター、`.76` は PICO、`.222` はノートPC。設定する前に、G1 につないだ別のPCから `ping -c 2 192.168.123.223` が返らない（空いている）ことを確かめる。設定したら `ping 192.168.123.164` が返れば OK
+2. SSH の鍵：`ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_g1`。公開鍵を G1 に登録する：`ssh-copy-id -i ~/.ssh/id_ed25519_g1.pub unitree@192.168.123.164`（G1 のパスワードを1回聞かれる）。G1 につなげないときは、公開鍵（`~/.ssh/id_ed25519_g1.pub`、人に見せてよい方）を送れば、つながっている別のPCから G1 の `~/.ssh/authorized_keys` に足せる。秘密鍵（`.pub` の付かない方）は送らない
+3. このスクリプト：`git clone -b claude/project-thread-fv7uja https://github.com/syakaikungg/TWIST2.git`（公開リポジトリなのでログイン不要）。`bash TWIST2/deploy_real/arm_ik/g1.sh status` で G1 の様子が出れば準備完了
+
+いつもの流れ
+- G1 の電源を入れたら：`bash g1.sh up`（sudo のパスワードを1回）→ PICO の XRobot → Remote Vision → ZEDMINI → Listen → `192.168.123.164` → Confirm
+- 腕を動かす：`bash g1.sh send 0.5 300`（ロボットに送る。止めるのは PICO の左 X、または別の端末で `bash g1.sh stop`）
+- 送らずに試す：`bash g1.sh dry`
 
 ## 操作（PICO）
 
