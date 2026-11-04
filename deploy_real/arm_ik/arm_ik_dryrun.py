@@ -96,6 +96,12 @@ def head_yaw(R_head):
     return math.atan2(fwd[1], fwd[0])
 
 
+def head_pitch_down(R_head):
+    """How far the headset looks down (positive) or up, in robot axes [rad]."""
+    fwd = (M @ R_head @ M.T) @ np.array([1.0, 0.0, 0.0])
+    return math.atan2(-fwd[2], math.hypot(fwd[0], fwd[1]))
+
+
 def tool_bodies(sides, tool):
     """Bodies at the end of each arm that take part in the collision avoidance."""
     return {s: (list(sim_drill.DRILL_BODIES) if (s == "right" and tool == "drill") else [HAND_BODY[s]])
@@ -264,6 +270,22 @@ class SyntheticSource:
             lgrip = 1.0 if (8.0 <= t < 10.5 or 11.5 <= t < 13.0) else 0.0
             d["trigger"] = 1.0 if (5.0 <= t < 6.0 or 9.0 <= t < 9.8) else 0.0
             ret = 14.0 <= t < 14.1
+        elif sc == "turn":
+            # The operator looks around while the hands stay still in front of the body: a glance 40 deg to the
+            # right (6.0-7.5 s) and a nod 25 deg down (8.0-9.5 s), turning about the neck, so the headset moves.
+            # The left grip starts during the glance (7.0 s); then the left hand moves back toward the body and out
+            # again along the body's forward axis (forward from this pose would hit the reach limit).
+            g = math.sin(math.pi * (t - 6.0) / 1.5) if 6.0 <= t < 7.5 else 0.0
+            nd = math.sin(math.pi * (t - 8.0) / 1.5) if 8.0 <= t < 9.5 else 0.0
+            Rh = (R.from_rotvec([0.0, -math.radians(40) * g, 0.0])
+                  * R.from_rotvec([-math.radians(25) * nd, 0.0, 0.0])).as_matrix()
+            neck = np.array([0.0, 1.49, 0.09])
+            head = (neck + Rh @ np.array([0.0, 0.11, -0.09]), Rh)
+            sway = 0.12 * math.sin(math.pi * (t - 9.5) / 3.0) if 9.5 <= t < 12.5 else 0.0
+            loff = np.array([0.0, 0.0, sway])
+            d["grip"] = 1.0 if 4.5 <= t < 13.0 else 0.0
+            lgrip = 1.0 if 7.0 <= t < 13.0 else 0.0
+            ret = 14.0 <= t < 14.1
         elif sc == "drill_cross":
             a = float(np.clip((t - 5.0) / 3.0, 0, 1)) - float(np.clip((t - 10.0) / 2.0, 0, 1))
             off = a * (np.array([-0.25, 0.80, -0.15]) - base)   # across, toward the left forearm, nearer
@@ -343,6 +365,15 @@ def main():
     ap.add_argument("--human-shoulder-width", type=float, default=0.38, help="operator shoulder width [m] (absolute)")
     ap.add_argument("--head-down", type=float, default=0.25, help="headset to shoulder line, down [m] (absolute)")
     ap.add_argument("--head-back", type=float, default=0.10, help="headset to shoulder line, back [m] (absolute)")
+    ap.add_argument("--neck-back", type=float, default=0.09,
+                    help="headset to the neck pivot, back, in the headset's own frame [m] (absolute). The shoulder "
+                         "line is placed from the neck pivot, so looking down or around does not move it; "
+                         "0 with --neck-down 0 = from the headset as before 2026-11-05")
+    ap.add_argument("--neck-down", type=float, default=0.11, help="headset to the neck pivot, down [m] (absolute)")
+    ap.add_argument("--heading", choices=["shared", "per_arm"], default="shared",
+                    help="the operator's forward direction for the hand targets: shared = taken from the headset "
+                         "when a grip starts with no arm following, and kept for both arms until both grips are "
+                         "released (default); per_arm = each grip takes its own (before 2026-11-05)")
     ap.add_argument("--orient-cost", type=float, default=0.3, help="weight of the hand orientation in the IK")
     ap.add_argument("--orient-pitch", type=float, default=0.0, help="extra pitch of the hand vs the controller [deg]")
     ap.add_argument("--lm-damping", type=float, default=1.0,
@@ -389,7 +420,7 @@ def main():
     ap.add_argument("--scenario", default="none",
                     choices=["none", "deadman", "estop_x", "pico_stale", "hold", "sim_suite", "reach_fwd",
                              "buttons", "stale_hold", "per_arm", "drill_cross", "estop_reach", "pause_reach",
-                             "temp_pause"])
+                             "temp_pause", "turn"])
     ap.add_argument("--selftest-redis", action="store_true", help="with --selftest: still write to Redis")
     ap.add_argument("--log-dir", default=str(Path.home() / "nextech_setup" / "logs"))
     args = ap.parse_args()
@@ -398,7 +429,7 @@ def main():
         args.duration = args.duration or {"none": 16.0, "hold": 12.0, "sim_suite": 24.0, "reach_fwd": 17.0,
                                           "buttons": 12.0, "stale_hold": 12.0, "per_arm": 16.0,
                                           "drill_cross": 14.0, "estop_reach": 15.0,
-                                          "pause_reach": 15.0, "temp_pause": 28.0}.get(args.scenario, 9.0)
+                                          "pause_reach": 15.0, "temp_pause": 28.0, "turn": 16.0}.get(args.scenario, 9.0)
 
     def on_sigterm(signum, frame):
         raise StopRequested("SIGTERM")
@@ -555,7 +586,8 @@ def main():
                  + [f"q_{n}" for n in ALL_NAMES] + [f"hand_{s}_{a}" for s in sides for a in "xyz"]
                  + [f"ctrl_{s}_{a}" for s in ("left", "right") for a in "xyz"] + [f"head_{a}" for a in "xyz"]
                  + ["lgrip", "ltrig", "lmenu", "rmenu", "lclick", "rclick", "laxis_x", "laxis_y", "raxis_x", "raxis_y"]
-                 + ["state", "stale_ms", "follow_left", "follow_right"])
+                 + ["state", "stale_ms", "follow_left", "follow_right", "head_yaw_deg", "head_pitch_down_deg",
+                    "forward_deg"])
 
     active = follow = drill = returning = False
     stale_holding = False          # data gap while enabled but not following: hold, resume when it is back
@@ -567,6 +599,7 @@ def main():
     follow_s = {s: False for s in sides}   # per arm: following its controller (follow = any of them)
     grip_wait_noted = False
     clutch = {}
+    heading = None                 # operator forward (head yaw at the first grip), shared by both arms
     last_stamp, last_stamp_change = None, time.time()
     ik_times, loop_times = [], []
     checks = {}
@@ -824,10 +857,17 @@ def main():
                 grip_wait_noted = False
             for s in sides:
                 if want[s] and not follow_s[s]:
-                    yaw0 = head_yaw(d["head"][1])
+                    hy = head_yaw(d["head"][1])
+                    others = any(follow_s[o] for o in sides if o != s)
+                    if args.heading == "per_arm" or heading is None or not others:
+                        heading, how = hy, "new"
+                    else:
+                        how = "kept from the other arm"
+                    yaw0 = heading
                     clutch[s] = {"Rz": rot_z(-yaw0), "yaw0": yaw0, "c": d[s], "h": hand_pose(s),
                                  "tgt": hand_pose(s)}   # rate-limited target (absolute mode) starts at the hand
-                    print(f"[{t:6.1f}s] grip -> {s} arm FOLLOW (head yaw {math.degrees(yaw0):.0f} deg)")
+                    print(f"[{t:6.1f}s] grip -> {s} arm FOLLOW (head yaw {math.degrees(hy):.0f} deg, "
+                          f"forward {math.degrees(yaw0):.0f} deg {how})")
                 elif follow_s[s] and not want[s]:
                     if active:
                         print(f"[{t:6.1f}s] grip released -> {s} arm holds")
@@ -846,7 +886,10 @@ def main():
                         # Operator hand relative to the operator's shoulder (estimated from the headset),
                         # scaled, placed at the robot's shoulder. Orientation: controller -> hand, fixed map.
                         Ryaw = rot_z(clutch[s]["yaw0"])
-                        centre = M @ d["head"][0] + Ryaw @ np.array([-args.head_back, 0.0, -args.head_down])
+                        neck = M @ d["head"][0] + (M @ d["head"][1] @ M.T) @ np.array([-args.neck_back, 0.0,
+                                                                                       -args.neck_down])
+                        centre = neck + Ryaw @ np.array([-(args.head_back - args.neck_back), 0.0,
+                                                         -(args.head_down - args.neck_down)])
                         side_y = (0.5 if s == "left" else -0.5) * args.human_shoulder_width
                         op_sh = centre + Ryaw @ np.array([0.0, side_y, 0.0])
                         v = abs_scale * (clutch[s]["Rz"] @ (M @ cp - op_sh))
@@ -929,12 +972,22 @@ def main():
                          + [int(d.get(k, False)) for k in ("lmenu", "rmenu", "lclick", "rclick")]
                          + [f"{v:.2f}" for v in (list(d.get("laxis", [0.0, 0.0]))[:2] + list(d.get("raxis", [0.0, 0.0]))[:2])]
                          + [ik_state(), f"{stale_s * 1000:.0f}",
-                            int(follow_s.get("left", False)), int(follow_s.get("right", False))])
+                            int(follow_s.get("left", False)), int(follow_s.get("right", False))]
+                         + ([f"{math.degrees(head_yaw(d['head'][1])):.1f}",
+                             f"{math.degrees(head_pitch_down(d['head'][1])):.1f}"] if d["head"] is not None
+                            else ["", ""])
+                         + [f"{math.degrees(heading):.1f}" if heading is not None else ""])
 
             if args.selftest and args.scenario == "per_arm":
                 for name, tm in (("start", 4.4), ("right_only", 7.4), ("left_only", 10.9), ("both", 13.4)):
                     if name not in checks and t >= tm:
                         checks[name] = {s: hand_pose(s)[0] for s in sides}
+            if args.selftest and args.scenario == "turn":
+                hp = {sd: hand_pose(sd)[0] for sd in sides}
+                if 5.5 <= t < 10.0 and follow_s.get("right"):     # glance and nod: the right hand should stay
+                    checks.setdefault("right_still", []).append(hp["right"])
+                if 9.5 <= t < 12.5 and follow_s.get("left"):      # left hand sway: along x only, no sideways
+                    checks.setdefault("left_sway", []).append(hp["left"])
             if args.selftest and args.scenario == "none":
                 for name, t0, t1 in SyntheticSource.PHASES:
                     if name not in checks and t >= (t0 + t1) / 2 and follow:
@@ -964,7 +1017,17 @@ def main():
     print(f"timing over {len(lp)} loops: ik avg {ik.mean():.2f} ms / max {ik.max():.2f} ms, "
           f"loop avg {lp.mean():.2f} ms / p95 {np.percentile(lp, 95):.2f} ms / max {lp.max():.2f} ms "
           f"(budget {dt * 1000:.1f} ms)")
-    if args.selftest and args.scenario == "per_arm":
+    if args.selftest and args.scenario == "turn":
+        if "right_still" in checks:
+            a = np.array(checks["right_still"])
+            print(f"check turn right_still: right hand range while looking around "
+                  f"{np.linalg.norm(a.max(0) - a.min(0)) * 100:.1f} cm (x {np.ptp(a[:, 0]) * 100:.1f}, "
+                  f"y {np.ptp(a[:, 1]) * 100:.1f}, z {np.ptp(a[:, 2]) * 100:.1f})")
+        if "left_sway" in checks:
+            a = np.array(checks["left_sway"])
+            print(f"check turn left_sway: left hand forward/back {np.ptp(a[:, 0]) * 100:.1f} cm, "
+                  f"sideways {np.ptp(a[:, 1]) * 100:.1f} cm")
+    elif args.selftest and args.scenario == "per_arm":
         order = [k for k in ("start", "right_only", "left_only", "both") if k in checks]
         for a, b in zip(order, order[1:]):
             moved = ", ".join(f"{s} {np.linalg.norm(checks[b][s] - checks[a][s]) * 100:.1f} cm" for s in sides)
