@@ -4,8 +4,8 @@
 Joint angles arrive over SSH: `stream_sim.py` on the G1 prints Redis `sim_qpos` as JSON lines, so no
 network port is opened on either side. The model is the same TWIST2 g1_sim2sim_29dof.xml (this PC's copy
 of the repo, same commit) with the pelvis and legs welded, as in arm_sim.py. Bodies in contact turn red.
-The right hand carries the drill drawn by sim_drill.py (put it next to this file): it spins and its lamps
-turn green while the simulator says the drill is ON.
+The right wrist carries the drill drawn by sim_drill.py in place of the hand (put it next to this file):
+it spins and its lamps turn green while the simulator says the drill is ON.
 
   ~/nextech_viewer/venv/bin/python sim_viewer.py [--payload-kg 1.5] [--no-drill]
 """
@@ -71,7 +71,7 @@ def main():
     ap.add_argument("--key", default="/home/masak/.ssh/id_ed25519_g1")
     ap.add_argument("--payload-kg", type=float, default=0.0, help="draw the dummy drill mass (display only)")
     ap.add_argument("--payload-offset", type=float, default=0.05)
-    ap.add_argument("--no-drill", action="store_true", help="leave out the drill drawn at the right hand")
+    ap.add_argument("--no-drill", action="store_true", help="no drill (the hand stays)")
     ap.add_argument("--pretty", action="store_true", help="keep shadows/reflections (slower on a laptop GPU)")
     args = ap.parse_args()
 

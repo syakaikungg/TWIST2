@@ -6,7 +6,7 @@ NexTech Week 2026 秋の展示用。G1 の内蔵PC（`~/nextech/arm_ik/`）で�
 |---|---|
 | `arm_ik_dryrun.py` | PICO（xrobotoolkit_sdk）から手の位置を読み、mink で腕14関節の IK を解いて Redis `arm_ik_q` / `drill_cmd` / `teleop_display` に書く。ロボットには何も送らない |
 | `arm_sdk_bridge.py` | Redis `arm_ik_q` → `rt/arm_sdk` の LowCmd。既定はログのみで、`--send` のときだけ送信する。`--sim` は `arm_sim.py` と Redis でつなぐ |
-| `arm_sim.py` | 骨盤と脚を固定した MuJoCo のシミュレーター（腕と腰を arm_sdk と同じ形で動かす）。右手に見た目だけのドリルが付く |
+| `arm_sim.py` | 骨盤と脚を固定した MuJoCo のシミュレーター（腕と腰を arm_sdk と同じ形で動かす）。右手を外した手首に見た目だけのドリルが付く |
 | `sim_drill.py` | シミュレーターのドリルの形と回し方（ビューアーからも使う） |
 | `sim_viewer.py` | ノートPC（WSL）のビューアー。G1の `stream_sim.py` を SSH で動かして関節角を受け取り、MuJoCo の窓に描く。`sim_drill.py` と同じフォルダ（`~/nextech_viewer/`）に置く |
 | `sim_run.sh` / `sim_live_bg.sh` | シミュレーターでの自動テスト / PICO で操作する live |
@@ -56,9 +56,9 @@ arm_sdk を有効にすると、腰（12〜14）もこちらの担当になる�
 
 ## シミュレーターのドリル
 
-`arm_sim.py` は右手に見た目だけのドリルを付ける（重さも当たり判定もないので、物理の結果は変わらない。重さは今までどおり `--payload-kg`）。IK の Redis `drill_cmd` が ON の間（追従中に右トリガー）、先が毎秒3回転で回り、モーターの輪が緑になる。実際の回転数ではなく、映像で回っているのが分かる速さにしている（`--drill-rps`）。`--no-drill` で外せる。
+`arm_sim.py` は右手を外して、手首に見た目だけのドリルを付ける（重さも当たり判定もないので、物理の結果は変わらない。重さは今までどおり `--payload-kg`）。IK の Redis `drill_cmd` が ON の間（追従中に右トリガー）、先が毎秒3回転で回り、モーターの2本の輪が緑になる。実際の回転数ではなく、映像で回っているのが分かる速さにしている（`--drill-rps`）。`--no-drill` で外せる。
 
-形は仮のもの（アタッチメントが未完成のため）。指の上にクランプ、その先にモーター、チャック（黄色の線）、ビット（平たい刃）が、手の前方向（`right_wrist_yaw_link` の x）に並ぶ。手首から先端まで約37cm。
+形は仮のもの（アダプターが未完成のため）。実機と同じく右手は外し、手首の取り付け面（手が付いていた所）にアダプター、モーター、チャック（黄色の線）、ビット（平たい刃）が、前腕の向き（`right_wrist_yaw_link` の x）に並ぶ。取り付け面から先端まで約24cm。手のメッシュには重さがないので、外しても物理は変わらない。IK が動かす点は今までどおり `right_rubber_hand`（取り付け面の位置）。
 
 状態は `sim_qpos` の `"drill": {"on": 0/1, "angle": rad, "rps": 回転/秒}` に入る。`sim_qpos` から絵を描くビューアーは、次の3行で同じドリルを出せる。
 

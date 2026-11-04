@@ -8,8 +8,9 @@ clipped to the motor limits (wrist pitch/yaw 5 Nm, as on the real G1), where "bu
 robot's own controller holding its standing arm posture. Steps MuJoCo in real time and writes
 `sim_lowstate` (q, dq, tau) for the bridge and `sim_qpos` (joint angles by name) for viewers.
 Records self-contacts (arm vs torso/head/pelvis/other arm), torques, tracking error and joint-limit proximity.
-The right hand carries a drill you can see (sim_drill.py, looks only): it spins while IK's Redis `drill_cmd`
-says ON, and its state goes into `sim_qpos` as "drill" for the viewers. --no-drill leaves it out.
+The right wrist carries a drill you can see in place of the hand (sim_drill.py, looks only): it spins while
+IK's Redis `drill_cmd` says ON, and its state goes into `sim_qpos` as "drill" for the viewers. --no-drill
+leaves it out.
 
   python arm_sim.py --duration 40 [--payload-kg 1.5 --payload-offset 0.05] [--video out.mp4]
 """
@@ -88,7 +89,7 @@ def main():
     ap.add_argument("--builtin-kd", type=float, default=1.5)
     ap.add_argument("--payload-kg", type=float, default=0.0, help="dummy drill mass at the right hand")
     ap.add_argument("--payload-offset", type=float, default=0.05, help="beyond the hand along the forearm [m]")
-    ap.add_argument("--no-drill", action="store_true", help="leave out the drill drawn at the right hand")
+    ap.add_argument("--no-drill", action="store_true", help="no drill (the hand stays)")
     ap.add_argument("--drill-rps", type=float, default=3.0, help="drawn spin speed while ON [rev/s] (not the real one)")
     ap.add_argument("--video", default="", help="mp4 path (offscreen render, needs EGL)")
     ap.add_argument("--tag", default="")
