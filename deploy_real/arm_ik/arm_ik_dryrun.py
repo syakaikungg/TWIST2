@@ -574,6 +574,10 @@ def main():
         b = bridge_status()
         if state == "ESTOP":
             lv, ja, en = "stop", "非常停止（PCから再起動が必要）", "E-STOP - restart from PC"
+        elif b is not None and b.get("state") in ("ESTOP_RAMP", "STOPPED"):
+            # the bridge stopped on its own monitors (tracking error, IK command gap, temperature, lowstate,
+            # stop.sh): the arms are back with the robot's controller even if the IK still follows the grips
+            lv, ja, en = "stop", "非常停止（ブリッジ・PCから再起動が必要）", "E-STOP (bridge) - restart from PC"
         elif state == "STALE_HOLD":
             lv, ja, en = "warn", "通信待ち（データが戻れば再開）", "WAITING FOR PICO DATA"
         elif state == "PAUSED":
