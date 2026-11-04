@@ -82,7 +82,7 @@ case "$cmd" in
     ;;
   boot)
     # G1 を起動し直したあとの準備 (sudo 不要)。G1 を再起動すると Unitree の映像サービス video_hub_pc4 が
-    # 戻ってカメラを使ってしまうので止め、実機カメラ (960x540) で PICO を待つ。
+    # 戻ってカメラを使ってしまうことがある (11/4 朝) ので止め、実機カメラ (960x540) で PICO を待つ。
     # USB の省電力を切る設定は sudo が要るので、起動コマンドの側で先に行う (README 参照)。
     MSCLI=/unitree/sbin/mscli
     if [ -x "$MSCLI" ]; then
@@ -96,10 +96,11 @@ case "$cmd" in
     for d in /sys/bus/usb/devices/2-2.3 /sys/bus/usb/devices/2-2; do
       [ -e "$d/power/control" ] && echo "USB $(basename $d) $(cat $d/product 2>/dev/null): power/control=$(cat $d/power/control)"
     done
+    # bash cam_to_pico.sh boot と呼ばれると $0 にパスが無いので、自分のフォルダの絶対パスで呼ぶ
     if pgrep -f "$PAT" > /dev/null; then
-      "$0" stop
+      bash "$DIR/cam_to_pico.sh" stop
     fi
-    "$0" start v4l2 --cam-size 960x540 --listen 192.168.123.164:13579 "$@"
+    bash "$DIR/cam_to_pico.sh" start v4l2 --cam-size 960x540 --listen 192.168.123.164:13579 "$@"
     ;;
   simcam)
     # シミュレーターの頭カメラ目線の描画 (start sim と組み合わせる)
