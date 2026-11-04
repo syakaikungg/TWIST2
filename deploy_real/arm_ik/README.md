@@ -12,6 +12,8 @@ NexTech Week 2026 秋の展示用。G1 の内蔵PC（`~/nextech/arm_ik/`）で�
 | `sim_run.sh` / `sim_live_bg.sh` | シミュレーターでの自動テスト / PICO で操作する live |
 | `run_live.sh` | 実機。`run_live.sh dry` はロボットに送らずに動かす（既定60秒）、`run_live.sh send` は `--send` で送る（既定180秒、本人の確認後にだけ使う）。上限は既定0.5 rad/s、手先0.6 m/s |
 | `stop.sh` | 非常停止（Redis `teleop_stop`） |
+| `render_front.py` | 記録（`stream_sim.py` の出力）か arm_sim の CSV から、前などから見た動画を作る（G1 では EGL＋imageio-ffmpeg） |
+| `check_tool_gap.py` | IK か arm_sim のログから、ドリル（か手）が体と反対の腕にどこまで近づいたかを出す |
 | そのほか | 解析やテスト用の小さなスクリプト |
 
 ## 操作（PICO）
@@ -56,7 +58,7 @@ arm_sdk を有効にすると、腰（12〜14）もこちらの担当になる�
 
 ## シミュレーターのドリル
 
-`arm_sim.py` は右手を外して、手首に見た目だけのドリルを付ける（重さも当たり判定もないので、物理の結果は変わらない。重さは今までどおり `--payload-kg`）。IK の Redis `drill_cmd` が ON の間（追従中に右トリガー）、先が毎秒3回転で回り、モーターの2本の輪が緑になる。実際の回転数ではなく、映像で回っているのが分かる速さにしている（`--drill-rps`）。`--no-drill` で外せる。
+`arm_sim.py` は右手を外して、手首にドリルを付ける（重さはないので、重さは今までどおり `--payload-kg`）。IK の Redis `drill_cmd` が ON の間（追従中に右トリガー）、先が毎秒3回転で回り、モーターの2本の輪が緑になる。実際の回転数ではなく、映像で回っているのが分かる速さにしている（`--drill-rps`）。`--no-drill` で外せる。
 
 形は仮のもの（アダプターが未完成のため）。実機と同じく右手は外し、手首の取り付け面（手が付いていた所）にアダプター、モーター、チャック（黄色の線）、ビット（平たい刃）が、前腕の向き（`right_wrist_yaw_link` の x）に並ぶ。取り付け面から先端まで約24cm。手のメッシュには重さがないので、外しても物理は変わらない。IK が動かす点は今までどおり `right_rubber_hand`（取り付け面の位置）。
 
@@ -68,3 +70,12 @@ sim_drill.add_drill(spec)            # MjSpec.from_file(...) のあと、compile
 view = sim_drill.DrillView(m)        # compile したモデル
 view.apply(m, msg.get("drill"))      # 毎フレーム、mj_kinematics / mj_forward の前
 ```
+
+## ドリルと手の当たり判定
+
+ドリルの当たり判定は仮の形（`sim_drill.COLL_CAPSULES`：取り付け面から、モーター・チャック・ビットを覆うカプセル3つ、約24.5cm）。G1 のモデルの手には当たり判定がないので、手には箱を足す（`add_hand_collision`）。
+
+- IK（`--tool drill`、既定）：右腕＋ドリル、左腕＋左手の箱を、体（骨盤・胴・股関節・膝）から離し、左右の前腕どうしも離す（`--collision-margin`、既定4cm）。`--tool hand` はドリルの代わりに両手の箱で判定する（ドリルを付けていない実機用）
+- 握っていない側の腕は、IK の計算の中でも止めておく。止めた腕を計算のあとで戻すと、反対の腕から離れる動きが消えてしまうため
+- `arm_sim.py`：同じカプセルと左手の箱で、体や反対の腕との接触を数える（立ち姿勢では接触なし）
+- 確認：自動テスト `--scenario drill_cross` で、右手を左の前腕の方へ持っていき、ドリルを向ける。`check_tool_gap.py` で、ドリルと左腕の距離が3.7cm、体とが4.0cm で止まることを確認した（クラウド）

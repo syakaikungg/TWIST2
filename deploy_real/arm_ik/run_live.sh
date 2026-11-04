@@ -6,7 +6,9 @@
 # target speed is 0.6 m/s as in the simulator runs. Nothing moves until right A (arms hold their measured pose)
 # and a grip (right grip = right arm, left grip = left arm, both = both arms). Both programs stop by themselves:
 # IK after (seconds - 5) s, bridge after seconds s.
-# Stop at any time: left X/Y on the PICO, ~/nextech/arm_ik/stop.sh, or the remote (L2+B: damping).
+# Stop the arms at any time: left X/Y on the PICO or ~/nextech/arm_ik/stop.sh (arm_sdk weight -> 0 in 1 s: arms and
+# waist go back to the robot's own controller; the legs are never commanded). The remote's L2+B is whole-body
+# damping (the robot goes limp): last resort only, with the robot hanging on its rope.
 MODE=${1:-}
 case "$MODE" in
   send) SEND=--send; SECS=${3:-180} ;;

@@ -8,9 +8,9 @@ clipped to the motor limits (wrist pitch/yaw 5 Nm, as on the real G1), where "bu
 robot's own controller holding its standing arm posture. Steps MuJoCo in real time and writes
 `sim_lowstate` (q, dq, tau) for the bridge and `sim_qpos` (joint angles by name) for viewers.
 Records self-contacts (arm vs torso/head/pelvis/other arm), torques, tracking error and joint-limit proximity.
-The right wrist carries a drill you can see in place of the hand (sim_drill.py, looks only): it spins while
-IK's Redis `drill_cmd` says ON, and its state goes into `sim_qpos` as "drill" for the viewers. --no-drill
-leaves it out.
+The right wrist carries a drill in place of the hand (sim_drill.py, no mass): it spins while IK's Redis
+`drill_cmd` says ON, and its state goes into `sim_qpos` as "drill" for the viewers. Its collision capsules and
+a box on each remaining hand count as arm bodies in the contact check. --no-drill leaves it out.
 
   python arm_sim.py --duration 40 [--payload-kg 1.5 --payload-offset 0.05] [--video out.mp4]
 """
@@ -46,7 +46,7 @@ ARMATURE = {"N5020": 0.003609725, "W4010": 0.00425, "N7520-14": 0.01017752}
 JOINT_MOTOR = {n: "N5020" for n in ARM_NAMES}
 JOINT_MOTOR.update({n: "W4010" for n in WRIST_5NM})
 JOINT_MOTOR.update({"waist_yaw_joint": "N7520-14", "waist_roll_joint": "N5020", "waist_pitch_joint": "N5020"})
-ARM_BODY_KEYS = ("shoulder", "elbow", "wrist", "rubber_hand", "drill_payload")
+ARM_BODY_KEYS = ("shoulder", "elbow", "wrist", "rubber_hand", "drill")   # drill_body, drill_bit, drill_payload
 
 
 def build_model(payload_kg, payload_offset, drill=True):
@@ -77,8 +77,10 @@ def build_model(payload_kg, payload_offset, drill=True):
         b = wrist.add_body(name="drill_payload", pos=(np.array(hand.pos) + payload_offset * d).tolist())
         b.add_geom(type=mujoco.mjtGeom.mjGEOM_SPHERE, size=[0.03, 0, 0], mass=payload_kg,
                    contype=0, conaffinity=0, rgba=[1.0, 0.5, 0.0, 0.0 if drill else 1.0])   # hidden by the drill
-    if drill:                            # looks only: no mass, no contacts, so the physics is the same
-        sim_drill.add_drill(spec)
+    if drill:   # no mass; its collision capsules make contacts with the body / other arm (none at rest)
+        sim_drill.add_drill(spec, collision=True)
+    for hand in (["left_rubber_hand"] if drill else ["left_rubber_hand", "right_rubber_hand"]):
+        sim_drill.add_hand_collision(spec, hand)   # the hands have no collision shape in the model
     return spec.compile()
 
 
@@ -117,7 +119,8 @@ def main():
 
     names_b = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, b) or "world" for b in range(m.nbody)]
     arm_b = [any(k in n for k in ARM_BODY_KEYS) for n in names_b]
-    side_b = ["left" if n.startswith("left") else ("right" if n.startswith("right") else "") for n in names_b]
+    side_b = ["left" if n.startswith("left") else ("right" if n.startswith(("right", "drill")) else "")
+              for n in names_b]
     bname = lambda b: names_b[b]
     is_arm = lambda b: arm_b[b]
     side = lambda b: side_b[b]

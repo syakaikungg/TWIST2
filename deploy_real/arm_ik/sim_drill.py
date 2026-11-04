@@ -30,6 +30,16 @@ LAMP_GEOMS = ("drill_ring", "drill_lamp")   # green while ON (front and rear rin
 RING_OFF = [0.25, 0.25, 0.25, 1.0]
 RING_ON = [0.1, 0.95, 0.2, 1.0]
 _Z_TO_X = [math.cos(math.pi / 4), 0.0, math.sin(math.pi / 4), 0.0]   # cylinders run along local z
+# Collision shapes (add_drill(collision=True)): capsules along x from the flange, covering the motor, the chuck
+# and the bit. Hidden (group 3), no mass. name, radius, x from, x to.
+COLL_CAPSULES = (("drill_coll_motor", 0.034, 0.0, 0.134), ("drill_coll_chuck", 0.018, 0.134, 0.188),
+                 ("drill_coll_bit", 0.006, 0.188, 0.245))
+DRILL_BODIES = ("drill_body", "drill_bit")
+# A box around a hand (the hands have no collision shape in the G1 models), in the hand body's frame.
+# The right hand's mesh spans x 0..0.132, y -0.019..0.048, z -0.043..0.063; the left one is its mirror in y.
+HAND_BOX_HALF = [0.066, 0.034, 0.053]
+HAND_BOX_POS = [0.066, 0.015, 0.010]
+COLL_RGBA = [1.0, 0.3, 0.3, 0.35]
 
 
 def _geom(body, name, gtype, size, pos, rgba, along_x=False):
@@ -57,13 +67,41 @@ def _remove_hand(spec, hand):
     return len(geoms)
 
 
-def add_drill(spec, parent=PARENT, prefix="drill", remove_hand=HAND, flange=FLANGE):
+def _exclude(spec, b1, b2):
+    """No contacts between two bodies (e.g. a tool and the wrist links it is bolted next to)."""
+    if spec.body(b1) is not None and spec.body(b2) is not None:
+        e = spec.add_exclude()
+        e.bodyname1, e.bodyname2 = b1, b2
+
+
+def add_hand_collision(spec, hand):
+    """Give a hand body (left_rubber_hand / right_rubber_hand) a box collision shape. Returns the geom or None."""
+    body = spec.body(hand)
+    if body is None:
+        return None
+    sign = 1.0 if hand.startswith("right") else -1.0
+    g = body.add_geom(name=f"{hand}_coll", type=mujoco.mjtGeom.mjGEOM_BOX, size=list(HAND_BOX_HALF),
+                      pos=[HAND_BOX_POS[0], sign * HAND_BOX_POS[1], HAND_BOX_POS[2]], rgba=COLL_RGBA,
+                      group=3, density=0.0)
+    side = hand.split("_")[0]
+    for link in ("wrist_pitch_link", "wrist_roll_link"):
+        _exclude(spec, hand, f"{side}_{link}")
+    return g
+
+
+def add_drill(spec, parent=PARENT, prefix="drill", remove_hand=HAND, flange=None, collision=False):
     """Add the drill bodies on the wrist flange of `parent` and take the hand off. Returns the spec.
 
-    remove_hand=None keeps the hand's mesh (the drill then goes through it)."""
+    flange: where the drill starts, in the wrist frame (default: the hand body's position, else FLANGE).
+    remove_hand=None keeps the hand's mesh (the drill then goes through it).
+    collision=True also adds the collision capsules (COLL_CAPSULES, hidden, no mass), for the IK's
+    collision avoidance and the simulator's contacts. Without it the drill is looks only."""
     wrist = spec.body(parent)
     if wrist is None:
         raise ValueError(f"no body {parent!r} in the model")
+    if flange is None:
+        hb = spec.body(HAND)
+        flange = list(hb.pos) if hb is not None else FLANGE
     if remove_hand:
         _remove_hand(spec, remove_hand)
     cyl, box, sph = mujoco.mjtGeom.mjGEOM_CYLINDER, mujoco.mjtGeom.mjGEOM_BOX, mujoco.mjtGeom.mjGEOM_SPHERE
@@ -80,6 +118,13 @@ def add_drill(spec, parent=PARENT, prefix="drill", remove_hand=HAND, flange=FLAN
     _geom(bit, f"{prefix}_shaft", cyl, [0.0035, 0.035, 0], [0.071, 0.0, 0.0], [0.75, 0.75, 0.78, 1.0], True)
     _geom(bit, f"{prefix}_blade", box, [0.028, 0.009, 0.0012], [0.078, 0.0, 0.0], [0.35, 0.4, 0.5, 1.0])
     _geom(bit, f"{prefix}_tip", sph, [0.005, 0, 0], [0.106, 0.0, 0.0], [0.35, 0.4, 0.5, 1.0])
+    if collision:
+        cap = mujoco.mjtGeom.mjGEOM_CAPSULE
+        for name, r, x0, x1 in COLL_CAPSULES:
+            body.add_geom(name=name, type=cap, size=[r, (x1 - x0) / 2 - r, 0], pos=[(x0 + x1) / 2, 0.0, 0.0],
+                          quat=_Z_TO_X, rgba=COLL_RGBA, group=3, density=0.0)
+        for link in ("wrist_pitch_link", "wrist_roll_link"):
+            _exclude(spec, f"{prefix}_body", parent.replace("wrist_yaw_link", link))
     return spec
 
 

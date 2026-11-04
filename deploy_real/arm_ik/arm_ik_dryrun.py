@@ -22,9 +22,12 @@ Also an emergency stop: PICO data missing for 0.3 s while following (a grip held
 Ctrl+C / SIGTERM. A shorter gap while not following (Wi-Fi hiccup) only holds: the arms stay where they
 are, and teleop carries on by itself when the data is back (hold the grip again to move).
 The state for the operator's display (PICO video overlay) is written to Redis `teleop_display`.
+Collision avoidance keeps each arm (and what it holds) away from the body and the two forearms apart. With
+--tool drill (default) the right arm carries the drill of sim_drill.py (capsules from the wrist flange, about
+24 cm long); --tool hand checks both hands instead (a box around each, as the real hands are still on).
 
   python arm_ik_dryrun.py --arms both
-  python arm_ik_dryrun.py --selftest [--scenario deadman|estop_x|pico_stale|per_arm|none] [--selftest-redis]
+  python arm_ik_dryrun.py --selftest [--scenario deadman|estop_x|pico_stale|per_arm|drill_cross|none] [--selftest-redis]
 """
 import argparse
 import csv
@@ -40,6 +43,8 @@ import mujoco
 import numpy as np
 from loop_rate_limiters import RateLimiter
 from scipy.spatial.transform import Rotation as R
+
+import sim_drill   # next to this file: the drill's shape (also drawn by the simulator and its viewers)
 
 from general_motion_retargeting import ROBOT_XML_DICT
 
@@ -91,10 +96,22 @@ def head_yaw(R_head):
     return math.atan2(fwd[1], fwd[0])
 
 
-def build_arm_model(sides):
-    """GMR's G1 29DOF model with only the chosen arms' joints left free (base, legs, waist welded)."""
+def tool_bodies(sides, tool):
+    """Bodies at the end of each arm that take part in the collision avoidance."""
+    return {s: (list(sim_drill.DRILL_BODIES) if (s == "right" and tool == "drill") else [HAND_BODY[s]])
+            for s in sides}
+
+
+def build_arm_model(sides, tool="drill"):
+    """GMR's G1 29DOF model with only the chosen arms' joints left free (base, legs, waist welded), plus the
+    collision shapes of what each arm holds: the drill on the right wrist (tool=drill), a box on each hand."""
     keep = {j for s in sides for j in ARM_JOINTS[s]}
     spec = mujoco.MjSpec.from_file(str(ROBOT_XML_DICT["unitree_g1"]))
+    for s in sides:
+        if s == "right" and tool == "drill":
+            sim_drill.add_drill(spec, collision=True)
+        else:
+            sim_drill.add_hand_collision(spec, HAND_BODY[s])
     for a in list(spec.actuators):
         if a.target not in keep:
             spec.delete(a)
@@ -168,6 +185,10 @@ class SyntheticSource:
     scenario "per_arm": A at 1 s; both controllers sway forward/back from 4 s; right grip only 4.5-7 s, left grip
       only 8-10.5 s, both 11.5-13 s (each arm must move only while its own grip is held); trigger 5-6 s (right
       arm following -> drill ON) and 9-9.8 s (only the left arm following -> drill stays OFF); return at 14 s.
+    scenario "drill_cross": A at 1 s; right grip only 4.5-12 s: the right hand goes across in front of the
+      body toward the left forearm and turns 100 deg so that the drill points at it (5-8 s), stays (8-10 s),
+      comes back (10-12 s); the left arm stays. With --tool drill the drill must keep clear of the body and the left arm
+      (check with check_tool_gap.py).
     Other scenarios hold the left grip together with the right one (both arms follow, as before).
     scenario "buttons": A at 1 s, grip 1.5-6 s with a forward drift, B at 3 s and 5 s (Remote Vision's
       eye switch: must change nothing), return button at 7 s (glide back, pause), A at 10 s (enabled again).
@@ -229,6 +250,13 @@ class SyntheticSource:
             lgrip = 1.0 if (8.0 <= t < 10.5 or 11.5 <= t < 13.0) else 0.0
             d["trigger"] = 1.0 if (5.0 <= t < 6.0 or 9.0 <= t < 9.8) else 0.0
             ret = 14.0 <= t < 14.1
+        elif sc == "drill_cross":
+            a = float(np.clip((t - 5.0) / 3.0, 0, 1)) - float(np.clip((t - 10.0) / 2.0, 0, 1))
+            off = a * (np.array([-0.25, 0.80, -0.15]) - base)   # across, toward the left forearm, nearer
+            rot = R.from_rotvec([0.0, math.radians(100) * a, 0.0]).as_matrix()   # drill turned to point left
+            d["grip"] = 1.0 if 4.5 <= t < 12.0 else 0.0
+            lgrip = 0.0
+            ret = 13.0 <= t < 13.1
         elif sc == "none":
             for name, t0, t1 in self.PHASES:
                 if t0 <= t < t1:
@@ -317,6 +345,9 @@ def main():
     ap.add_argument("--posture-cost", type=float, default=0.05)
     ap.add_argument("--collision-margin", type=float, default=0.04,
                     help="keep arm links this far from the body / other forearm [m] (0 = off)")
+    ap.add_argument("--tool", choices=["drill", "hand"], default="drill",
+                    help="what the right arm holds, for the collision avoidance: the drill on the wrist "
+                         "(default) or the hand (both hands checked)")
     ap.add_argument("--return-button", choices=["rclick", "B", "none"], default="rclick",
                     help="glide back to the start pose, then pause: right stick press (default), B, or none. "
                          "B is also Remote Vision's one-eye/both-eyes switch.")
@@ -330,21 +361,22 @@ def main():
     ap.add_argument("--selftest", action="store_true", help="synthetic inputs, no PICO, no Redis")
     ap.add_argument("--scenario", default="none",
                     choices=["none", "deadman", "estop_x", "pico_stale", "hold", "sim_suite", "reach_fwd",
-                             "buttons", "stale_hold", "per_arm"])
+                             "buttons", "stale_hold", "per_arm", "drill_cross"])
     ap.add_argument("--selftest-redis", action="store_true", help="with --selftest: still write to Redis")
     ap.add_argument("--log-dir", default=str(Path.home() / "nextech_setup" / "logs"))
     args = ap.parse_args()
     if args.selftest:
         args.no_redis = args.no_redis or not args.selftest_redis
         args.duration = args.duration or {"none": 16.0, "hold": 12.0, "sim_suite": 24.0, "reach_fwd": 17.0,
-                                          "buttons": 12.0, "stale_hold": 12.0, "per_arm": 16.0}.get(args.scenario, 9.0)
+                                          "buttons": 12.0, "stale_hold": 12.0, "per_arm": 16.0,
+                                          "drill_cross": 14.0}.get(args.scenario, 9.0)
 
     def on_sigterm(signum, frame):
         raise StopRequested("SIGTERM")
     signal.signal(signal.SIGTERM, on_sigterm)
 
     sides = ["right"] if args.arms == "right" else ["left", "right"]
-    model = build_arm_model(sides)
+    model = build_arm_model(sides, args.tool)
     names = [mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j) for j in range(model.njnt)]
     side_idx = {s: np.array([i for i, n in enumerate(names) if n in ARM_JOINTS[s]]) for s in sides}   # in cfg.q
     q0 = np.array([dict(zip(ARM_JOINTS[s], DEFAULT_Q[s]))[n] for n in names for s in sides if n in ARM_JOINTS[s]])
@@ -373,6 +405,9 @@ def main():
     posture = mink.PostureTask(model, cost=args.posture_cost)
     posture.set_target(q0)
     base_limits = [mink.ConfigurationLimit(model), mink.VelocityLimit(model, {n: args.max_vel for n in names})]
+    # An arm whose grip is not held is frozen inside the IK too, so that keeping clear of the other arm is
+    # done by the arm that moves (overriding the held arm after the solve would undo that).
+    hold_limits = {s: mink.VelocityLimit(model, {n: 1e-6 for n in ARM_JOINTS[s]}) for s in sides}
     limits = list(base_limits)
 
     def coll_geoms(bodies):
@@ -383,10 +418,11 @@ def main():
                 ids += [g for g in mink.get_body_geom_ids(model, b) if model.geom_contype[g] or model.geom_conaffinity[g]]
         return ids
 
-    coll_pairs = [(coll_geoms([f"{s}_{l}" for l in ARM_LINKS]), coll_geoms(BODY_LINKS)) for s in sides]
+    tools = tool_bodies(sides, args.tool)
+    coll_pairs = [(coll_geoms([f"{s}_{l}" for l in ARM_LINKS] + tools[s]), coll_geoms(BODY_LINKS)) for s in sides]
     if len(sides) == 2:
-        coll_pairs.append((coll_geoms([f"left_{l}" for l in FOREARM_LINKS]),
-                           coll_geoms([f"right_{l}" for l in FOREARM_LINKS])))
+        coll_pairs.append((coll_geoms([f"left_{l}" for l in FOREARM_LINKS] + tools["left"]),
+                           coll_geoms([f"right_{l}" for l in FOREARM_LINKS] + tools["right"])))
 
     def min_pair_distance():
         best = 1.0
@@ -747,8 +783,9 @@ def main():
             if follow or returning:
                 widen_collision_margin()
                 q_prev = cfg.q.copy()
+                held = [] if returning else [hold_limits[s] for s in sides if not follow_s[s]]
                 vel = mink.solve_ik(cfg, list(frame_tasks.values()) + [posture], dt, "daqp",
-                                    damping=1e-3, limits=limits)
+                                    damping=1e-3, limits=limits + held)
                 cfg.integrate_inplace(vel, dt)
                 q_new = q_prev + np.clip(cfg.q - q_prev, -max_step, max_step)
                 if not returning:   # an arm whose grip is not held stays exactly where it is
