@@ -58,10 +58,10 @@ applyYaw();
 const hud = { status: '', stats: '', warn: '', visible: true, dirty: true };
 const hudCanvas = document.createElement('canvas');
 hudCanvas.width = 1024;
-hudCanvas.height = 256;
+hudCanvas.height = 320;
 const hudTex = new THREE.CanvasTexture(hudCanvas);
 hudTex.colorSpace = THREE.SRGBColorSpace;
-const hudMesh = new THREE.Mesh(new THREE.PlaneGeometry(0.6, 0.15),
+const hudMesh = new THREE.Mesh(new THREE.PlaneGeometry(0.6, 0.1875),
   new THREE.MeshBasicMaterial({ map: hudTex, transparent: true, depthTest: false, depthWrite: false }));
 hudMesh.position.set(0, -0.22, -0.8);
 hudMesh.renderOrder = 999;
@@ -74,16 +74,18 @@ function drawHud() {
   g.clearRect(0, 0, hudCanvas.width, hudCanvas.height);
   g.fillStyle = 'rgba(16,16,16,0.72)';
   g.beginPath();
-  g.roundRect ? g.roundRect(0, 0, 1024, 256, 28) : g.rect(0, 0, 1024, 256);
+  g.roundRect ? g.roundRect(0, 0, 1024, 320, 28) : g.rect(0, 0, 1024, 320);
   g.fill();
   g.fillStyle = '#ececea';
   g.font = '600 40px system-ui, sans-serif';
-  g.fillText(hud.status.slice(0, 34), 36, 64);
-  g.font = '32px system-ui, sans-serif';
+  g.fillText(hud.status.slice(0, 24), 36, 62);
+  g.font = '30px system-ui, sans-serif';
   g.fillStyle = '#c8c8c4';
-  g.fillText(hud.stats.slice(0, 56), 36, 124);
-  g.fillText(`正面 ${Math.round(yawDeg)}°  （スティック左右で回す / B・Y で戻す）`, 36, 176);
-  if (hud.warn) { g.fillStyle = '#f6ad55'; g.fillText(hud.warn.slice(0, 50), 36, 226); }
+  g.fillText(hud.stats.slice(0, 60), 36, 116);
+  g.fillText(`正面 ${Math.round(yawDeg)}°（スティック左右で回す）`, 36, 164);
+  g.fillStyle = '#ececea';
+  g.fillText('A・X: VRを終わる　B・Y: 正面を戻す　トリガー: この表示', 36, 212);
+  if (hud.warn) { g.fillStyle = '#f6ad55'; g.fillText(hud.warn.slice(0, 32), 36, 270); }
   hudTex.needsUpdate = true;
 }
 
@@ -128,10 +130,13 @@ function pollGamepads(dt) {
     const a2 = gp.axes[2] || 0, a0 = gp.axes[0] || 0;
     const ax = Math.abs(a2) >= Math.abs(a0) ? a2 : a0;
     if (Math.abs(ax) > 0.25) { yawDeg += ax * 60 * dt; applyYaw(); hud.dirty = true; }
-    const b5 = !!(gp.buttons[5] && gp.buttons[5].pressed); // B / Y
     const key = src.handedness;
-    if (b5 && !prevButtons.get(key)) { yawDeg = 0; applyYaw(); saveYaw(); hud.dirty = true; }
-    prevButtons.set(key, b5);
+    const b4 = !!(gp.buttons[4] && gp.buttons[4].pressed); // A / X
+    const b5 = !!(gp.buttons[5] && gp.buttons[5].pressed); // B / Y
+    const prev = prevButtons.get(key) || {};
+    if (b5 && !prev.b5) { yawDeg = 0; applyYaw(); saveYaw(); hud.dirty = true; }
+    if (b4 && !prev.b4) { saveYaw(); session.end().catch(() => {}); }
+    prevButtons.set(key, { b4, b5 });
   }
 }
 

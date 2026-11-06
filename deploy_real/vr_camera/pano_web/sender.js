@@ -53,7 +53,7 @@ async function openCamera() {
   if (stream) stream.getTracks().forEach((t) => t.stop());
   stream = s;
   const track = stream.getVideoTracks()[0];
-  track.contentHint = 'detail';
+  track.contentHint = $('pref').value === 'maintain-resolution' ? 'detail' : 'motion';
   $('preview').srcObject = stream;
   const st = track.getSettings();
   const ratio = st.width && st.height ? st.width / st.height : 0;
@@ -122,25 +122,72 @@ async function answerOffer(session, desc) {
   const snd = conn.addTrack(track, stream);
   const answer = await conn.createAnswer();
   await conn.setLocalDescription(answer);
+  await applySendParams(snd);
+  await iceGatheringDone(conn);
+  const r = await postJSON('/api/answer', { session, desc: { type: conn.localDescription.type, sdp: conn.localDescription.sdp } });
+  if (r.status !== 200) serverLog('sender', `answer が古い (session ${session})`);
+  setStatus('PICO とつないでいます…');
+}
+
+// 送る大きさ・上限・優先を今の送信に反映する（つないだままでも変えられる）
+async function applySendParams(snd) {
+  if (!snd) return;
+  const maxKbps = Math.round((Number($('mbps').value) || 15) * 1000);
+  const fps = Number($('fps').value) || 30;
+  const scale = Number($('scale').value) || 1;
+  const pref = $('pref').value;
   try {
     const p = snd.getParameters();
     if (!p.encodings || !p.encodings.length) p.encodings = [{}];
     p.encodings[0].maxBitrate = maxKbps * 1000;
     p.encodings[0].maxFramerate = fps;
+    p.encodings[0].scaleResolutionDownBy = scale;
     await snd.setParameters(p);
   } catch (e) {
-    serverLog('sender', 'ビットレート上限の設定に失敗: ' + e.message);
+    serverLog('sender', '送り方の設定に失敗: ' + e.message);
   }
   try {
-    // 回線や CPU が苦しいときは fps を落としてでも解像度を保つ（360度は細かさが大事）。古い Chrome は無視する
     const p = snd.getParameters();
-    p.degradationPreference = 'maintain-resolution';
+    p.degradationPreference = pref;
     await snd.setParameters(p);
-  } catch (_) { /* 対応していなければ contentHint=detail で代用 */ }
-  await iceGatheringDone(conn);
-  const r = await postJSON('/api/answer', { session, desc: { type: conn.localDescription.type, sdp: conn.localDescription.sdp } });
-  if (r.status !== 200) serverLog('sender', `answer が古い (session ${session})`);
-  setStatus('PICO とつないでいます…');
+  } catch (_) { /* 古いブラウザは contentHint で代用 */ }
+  if (snd.track) snd.track.contentHint = pref === 'maintain-resolution' ? 'detail' : 'motion';
+  serverLog('sender', `送り方: 大きさ 1/${scale} 上限 ${maxKbps / 1000}Mbps ${fps}fps 優先 ${pref}`);
+}
+
+function currentSender() {
+  return pc ? pc.getSenders().find((x) => x.track && x.track.kind === 'video') : null;
+}
+['scale', 'pref', 'mbps', 'fps'].forEach((id) => $(id).addEventListener('change', () => applySendParams(currentSender())));
+
+// PC のブラウザ・GPU と、ハードで圧縮できるか（WebCodecs で調べる）をログに出す
+async function encoderDiag() {
+  const brands = (navigator.userAgentData && navigator.userAgentData.brands || [])
+    .map((b) => b.brand).filter((b) => !/Not.?A.?Brand|Chromium/i.test(b)).join('/') || navigator.userAgent;
+  let gpu = '?';
+  try {
+    const gl = document.createElement('canvas').getContext('webgl');
+    const ext = gl && gl.getExtension('WEBGL_debug_renderer_info');
+    gpu = gl ? (ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)) : 'WebGL なし';
+  } catch (_) { /* そのまま */ }
+  const hw = [];
+  if ('VideoEncoder' in window) {
+    const list = [['H264', 'avc1.640033'], ['VP9', 'vp09.00.51.08'], ['AV1', 'av01.0.12M.08'], ['HEVC', 'hvc1.1.6.L153.B0']];
+    for (const [name, codec] of list) {
+      for (const [w, h] of [[2880, 1440], [1920, 960]]) {
+        let ok = false;
+        try {
+          const r = await VideoEncoder.isConfigSupported({ codec, width: w, height: h, bitrate: 10e6, framerate: 30,
+            hardwareAcceleration: 'prefer-hardware', latencyMode: 'realtime' });
+          ok = !!r.supported;
+        } catch (_) { ok = false; }
+        hw.push(`${name} ${w}x${h} ${ok ? '○' : '×'}`);
+      }
+    }
+  }
+  const line = `ブラウザ ${brands} / GPU ${gpu} / ハード圧縮 ${hw.join(', ') || '調べられない'}`;
+  $('encInfo').textContent = 'PC の圧縮: ' + line;
+  serverLog('sender', line);
 }
 
 async function offerLoop() {
@@ -201,6 +248,7 @@ navigator.mediaDevices.addEventListener('devicechange', () => listCameras());
   } catch (_) { /* なくても動く */ }
   await listCameras();
   setStatus('「カメラを開く」を押してください');
+  encoderDiag().catch(() => {});
   if (params.get('autostart') === '1') await openCamera().catch((e) => setStatus('カメラを開けません: ' + e.message, 'bad'));
   offerLoop();
 })();

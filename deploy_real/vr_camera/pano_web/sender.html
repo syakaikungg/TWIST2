@@ -49,6 +49,21 @@
   </div>
 
   <div class="card">
+    <div style="font-weight:600">送り方（つないだまま変えられる）</div>
+    <label>送る大きさ <select id="scale">
+      <option value="1">そのまま（2880x1440）</option>
+      <option value="1.5" selected>2/3（1920x960）</option>
+      <option value="2">1/2（1440x720）</option>
+    </select></label>
+    <label>優先 <select id="pref">
+      <option value="maintain-framerate" selected>なめらかさ（fps を保つ）</option>
+      <option value="balanced">バランス</option>
+      <option value="maintain-resolution">細かさ（解像度を保つ）</option>
+    </select></label>
+    <div id="encInfo" class="muted">PC の圧縮: 調べています…</div>
+  </div>
+
+  <div class="card">
     <video id="preview" autoplay muted playsinline></video>
     <div class="muted" id="viewerUrl"></div>
   </div>
