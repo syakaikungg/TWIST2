@@ -33,6 +33,7 @@ from urllib.parse import parse_qs, urlparse
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC_FILES = {
     "/sender.html": "text/html; charset=utf-8",
+    "/clock.html": "text/html; charset=utf-8",
     "/viewer.html": "text/html; charset=utf-8",
     "/sender.js": "text/javascript; charset=utf-8",
     "/viewer.js": "text/javascript; charset=utf-8",

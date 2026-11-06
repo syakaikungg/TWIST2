@@ -236,7 +236,17 @@ async function connect(reason) {
     for (;;) {
       if (conn !== pc) return;
       const a = await getJSON(`/api/answer?session=${mySession}`);
-      if (a.status === 200 && a.body) { await conn.setRemoteDescription(a.body.desc); break; }
+      if (a.status === 200 && a.body) {
+        await conn.setRemoteDescription(a.body.desc);
+        // まれに「つないでいます」のまま止まるので、10 秒でつながらなければやり直す
+        setTimeout(() => {
+          if (conn === pc && conn.connectionState !== 'connected') {
+            serverLog('viewer', `10 秒たってもつながらないのでやり直します (session ${mySession}, ${conn.connectionState})`);
+            maybeReconnect(conn);
+          }
+        }, 10000);
+        break;
+      }
       if (a.status === 410) { takenOver = true; setStatus('別の端末が表示を始めたので止めました。「再接続」で取り戻せます'); conn.close(); pc = null; return; }
       waited += 10;
       setStatus(`PC の送信ページの応答を待っています（${waited}秒）。PC でカメラを開いてください`);
