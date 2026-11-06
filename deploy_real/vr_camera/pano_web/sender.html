@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>360度カメラ 送信</title>
+<style>
+  :root { color-scheme: light dark; --bg: #f6f6f4; --fg: #1d1d1b; --muted: #6b6b66; --card: #fff; --line: #d9d9d4; --accent: #2b6cb0; --warn: #b7791f; --bad: #c53030; --ok: #2f855a; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #161615; --fg: #ececea; --muted: #a3a39e; --card: #20201f; --line: #3a3a37; --accent: #63a4e8; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.5 system-ui, "Segoe UI", "Hiragino Sans", "Yu Gothic UI", sans-serif; background: var(--bg); color: var(--fg); }
+  main { max-width: 980px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 20px; margin: 4px 0 12px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; margin-bottom: 12px; }
+  label { display: inline-block; margin: 4px 14px 4px 0; }
+  select, input, button { font: inherit; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--card); color: var(--fg); }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  #status { font-weight: 600; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  .muted { color: var(--muted); font-size: 13px; }
+  video { width: 100%; max-height: 360px; background: #000; border-radius: 6px; }
+  #clock { display: none; font: 700 min(14vw, 140px)/1.1 ui-monospace, Consolas, monospace; text-align: center; padding: 12px 0; }
+  code { font-family: ui-monospace, Consolas, monospace; }
+</style>
+</head>
+<body>
+<main>
+  <h1>360度カメラ → PICO 送信（PC側）</h1>
+
+  <div class="card">
+    <div id="status">準備中</div>
+    <div id="stats" class="muted">-</div>
+  </div>
+
+  <div class="card">
+    <label>カメラ <select id="camera"></select></label>
+    <label>解像度 <select id="res">
+      <option value="2880x1440" selected>2880x1440（Insta360 X5/X4 の360度）</option>
+      <option value="3840x1920">3840x1920</option>
+      <option value="1920x960">1920x960</option>
+      <option value="default">カメラの既定</option>
+    </select></label>
+    <label>fps <input id="fps" type="number" value="30" min="5" max="60" style="width:5em"></label>
+    <label>上限 <input id="mbps" type="number" value="15" min="1" max="60" step="1" style="width:5em"> Mbps</label>
+    <button id="start" class="primary">カメラを開く</button>
+    <div id="camInfo" class="muted" style="margin-top:6px">-</div>
+    <div class="muted">Insta360 はカメラ本体の USB モードで「ウェブカメラ（USBカメラ）」を選んでからつなぐ。2880x1440 を選ばないと 2:1 の360度画像にならないことがある。</div>
+  </div>
+
+  <div class="card">
+    <div style="font-weight:600">送り方（つないだまま変えられる）</div>
+    <label>送る大きさ <select id="scale">
+      <option value="1">そのまま（2880x1440）</option>
+      <option value="1.5" selected>2/3（1920x960）</option>
+      <option value="2">1/2（1440x720）</option>
+    </select></label>
+    <label>優先 <select id="pref">
+      <option value="maintain-framerate" selected>なめらかさ（fps を保つ）</option>
+      <option value="balanced">バランス</option>
+      <option value="maintain-resolution">細かさ（解像度を保つ）</option>
+    </select></label>
+    <div id="encInfo" class="muted">PC の圧縮: 調べています…</div>
+  </div>
+
+  <div class="card">
+    <video id="preview" autoplay muted playsinline></video>
+    <div class="muted" id="viewerUrl"></div>
+  </div>
+
+  <div class="card">
+    <label><input id="showClock" type="checkbox"> 遅延を測る時計を出す</label>
+    <div class="muted">時計をカメラに映し、PICO（または同じ PC で開いた表示ページ）に映った時刻と画面の時刻の差を写真で比べると、カメラから表示までの遅れが分かる。</div>
+    <div id="clock">00:00.000</div>
+  </div>
+</main>
+<script type="module" src="sender.js"></script>
+</body>
+</html>

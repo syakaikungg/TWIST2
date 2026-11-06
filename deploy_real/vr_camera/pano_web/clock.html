@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>遅延を測る時計</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #fff; color: #000; }
+  body { display: flex; flex-direction: column; align-items: center; justify-content: center; font-family: system-ui, sans-serif; }
+  #clock { font: 700 min(16vw, 220px)/1.1 ui-monospace, "DejaVu Sans Mono", Consolas, monospace; }
+  p { color: #555; font-size: 15px; max-width: 760px; text-align: center; padding: 0 16px; }
+</style>
+</head>
+<body>
+<div id="clock">00:00.000</div>
+<p>この時計を X5 に映し、PICO（または https://localhost:8443/）に映った時刻とこの画面の時刻を一緒に撮ると、差がカメラから表示までの遅れ。GStreamer で送るときは送信ページ（sender.html）の代わりにこれを使う。</p>
+<script>
+  const el = document.getElementById('clock');
+  function tick() {
+    const d = new Date();
+    el.textContent = String(d.getMinutes()).padStart(2, '0') + ':' + String(d.getSeconds()).padStart(2, '0') + '.' + String(d.getMilliseconds()).padStart(3, '0');
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+</script>
+</body>
+</html>
