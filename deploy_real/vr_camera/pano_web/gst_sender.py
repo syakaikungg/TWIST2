@@ -259,23 +259,30 @@ def set_props(el, props):
 
 
 def encoder_props(name, kbps, fps):
-    gop = max(1, int(round(fps * 2)))
+    gop = max(1, int(round(fps * 2)))  # 2 秒ごとにキーフレーム（途中で乱れたら PICO の求めでも出す）
+    # 1 枚の大きさを「約 2 枚分のビット」までに抑える。キーフレームが大きいと PC の UDP の送信バッファ
+    # （既定 約 210KB）からあふれてパケットが捨てられ、PICO で画面が緑になったり止まったりする
+    vbv_kbit = max(100, int(kbps * 2 / max(fps, 1)))
+    vbv_ms = max(20, int(2000 / max(fps, 1)))
     if name == "nvh264enc":
-        return [("preset", "low-latency-hq"), ("rc-mode", "cbr"), ("bitrate", kbps), ("max-bitrate", kbps),
-                ("gop-size", gop), ("bframes", 0), ("zerolatency", True), ("rc-lookahead", 0), ("aud", False)]
+        return [("preset", "low-latency-hq"), ("rc-mode", "cbr-ld-hq"), ("bitrate", kbps), ("max-bitrate", kbps),
+                ("vbv-buffer-size", vbv_kbit), ("gop-size", gop), ("bframes", 0), ("zerolatency", True),
+                ("rc-lookahead", 0), ("aud", False)]
     if name in ("nvcudah264enc", "nvautogpuh264enc"):
         return [("preset", "p1"), ("tune", "ultra-low-latency"), ("rate-control", "cbr"), ("bitrate", kbps),
-                ("gop-size", gop), ("b-frames", 0), ("zero-reorder-delay", True), ("rc-lookahead", 0)]
+                ("vbv-buffer-size", vbv_kbit), ("gop-size", gop), ("b-frames", 0), ("zero-reorder-delay", True),
+                ("rc-lookahead", 0)]
     if name in ("vah264lpenc", "vah264enc"):
-        return [("rate-control", "cbr"), ("bitrate", kbps), ("key-int-max", gop), ("b-frames", 0),
-                ("target-usage", 7), ("ref-frames", 1)]
+        return [("rate-control", "cbr"), ("bitrate", kbps), ("cpb-size", vbv_kbit), ("key-int-max", gop),
+                ("b-frames", 0), ("target-usage", 7), ("ref-frames", 1)]
     if name == "vaapih264enc":
-        return [("rate-control", "cbr"), ("bitrate", kbps), ("keyframe-period", gop), ("max-bframes", 0)]
+        return [("rate-control", "cbr"), ("bitrate", kbps), ("cpb-length", vbv_ms), ("keyframe-period", gop),
+                ("max-bframes", 0)]
     if name == "qsvh264enc":
         return [("rate-control", "cbr"), ("bitrate", kbps), ("gop-size", gop), ("b-frames", 0), ("target-usage", 7)]
     if name == "x264enc":
         return [("tune", "zerolatency"), ("speed-preset", "ultrafast"), ("bitrate", kbps), ("key-int-max", gop),
-                ("bframes", 0), ("sliced-threads", True), ("vbv-buf-capacity", 300)]
+                ("bframes", 0), ("sliced-threads", True), ("vbv-buf-capacity", vbv_ms)]
     if name == "openh264enc":
         return [("bitrate", kbps * 1000), ("gop-size", gop), ("complexity", "low"), ("rate-control", "bitrate")]
     return []
@@ -356,6 +363,7 @@ class Sender:
         self.answer_sent = False
         self.candidates = []
         self.frames = 0
+        self.max_frame = 0
         self.prev = None
         self.started_at = 0
         self.failed_encoders = set()
@@ -378,12 +386,11 @@ class Sender:
     def build_source(self):
         a = self.args
         if a.test:
-            desc = ("videotestsrc is-live=true pattern=smpte ! video/x-raw,width=%d,height=%d,framerate=%s" %
-                    (a.width, a.height, fps_fraction(a.fps)))
+            # 横に流れる試験映像（動きがあるので、なめらかさや乱れが見て分かる）
+            desc = ("videotestsrc is-live=true pattern=%s horizontal-speed=8 ! video/x-raw,width=%d,height=%d,framerate=%s" %
+                    (a.test_pattern, a.width, a.height, fps_fraction(a.fps)))
             if has("timeoverlay"):
                 desc += ' ! timeoverlay font-desc="Sans 48" halignment=center valignment=center'
-            else:
-                desc = desc.replace("pattern=smpte", "pattern=ball")
             if a.passthrough:  # カメラの代わりに、カメラ内の圧縮を真似る（High profile）
                 desc += (" ! videoconvert ! x264enc tune=zerolatency speed-preset=ultrafast key-int-max=30 bitrate=%d"
                          " ! video/x-h264,profile=high" % int(a.mbps * 1000))
@@ -470,6 +477,9 @@ class Sender:
 
     def _count_frame(self, pad, info):
         self.frames += 1
+        buf = info.get_buffer()
+        if buf is not None:
+            self.max_frame = max(self.max_frame, buf.get_size())
         return Gst.PadProbeReturn.OK
 
     def stop(self):
@@ -520,6 +530,12 @@ class Sender:
             tr.set_property("codec-preferences", Gst.Caps.from_string(
                 "application/x-rtp,media=video,encoding-name=H264,payload=%d,clock-rate=90000,"
                 "packetization-mode=(string)1" % pt))
+            # Wi-Fi で抜けたパケットを PICO の求めに応じて送り直す（NACK / RTX）。抜けると画面が緑になる
+            if not self.args.no_nack and tr.find_property("do-nack") is not None:
+                tr.set_property("do-nack", True)
+            if self.args.fec > 0 and tr.find_property("fec-type") is not None:
+                tr.set_property("fec-type", GstWebRTC.WebRTCFECType.ULP_RED)
+                tr.set_property("fec-percentage", int(self.args.fec))
         self.pipe.set_state(Gst.State.PLAYING)
         self.started_at = time.time()
 
@@ -573,6 +589,13 @@ class Sender:
         return False
 
     def _post_answer(self, session, sdp):
+        try:
+            with open(os.path.join(self.args.log_dir, "last_answer.sdp"), "w", encoding="utf-8") as f:
+                f.write(sdp)
+            feats = [n for n, k in (("再送", "rtx/90000"), ("FEC", "ulpfec/90000"), ("PLI", "nack pli")) if k in sdp]
+            log("送り直しの仕組み: %s" % ("・".join(feats) or "なし"))
+        except OSError:
+            pass
         try:
             st, _ = http_json("POST", "/api/answer", {"session": session, "desc": {"type": "answer", "sdp": sdp}})
             n = sdp.count("a=candidate")
@@ -654,7 +677,9 @@ class Sender:
             dt = max(1e-3, cur[0] - self.prev[0])
             fps = (cur[1] - self.prev[1]) / dt
             mbps = (cur[2] - self.prev[2]) * 8 / dt / 1e6
-            line = "送信: %s / %.0ffps / %.1fMbps / %s" % (self.out_size(), fps, mbps, self.encoder)
+            line = "送信: %s / %.0ffps / %.1fMbps / %s / 1枚最大%dKB" % (self.out_size(), fps, mbps, self.encoder,
+                                                                      self.max_frame // 1024)
+            self.max_frame = 0
             if rtt[0] is not None:
                 line += " / RTT%dms" % round(rtt[0] * 1000)
             log(line)
@@ -756,11 +781,14 @@ def main():
     ap.add_argument("--input-format", default="auto", choices=["auto", "raw", "mjpeg", "h264"],
                     help="カメラから受け取る形式（auto: 無圧縮 > MJPEG > H.264 の順）")
     ap.add_argument("--scale", type=float, default=1.0, help="送る大きさを 1/scale に（1.5 で 1920x960）")
-    ap.add_argument("--mbps", type=float, default=15, help="ビットレート (Mbps)")
+    ap.add_argument("--mbps", type=float, default=10, help="ビットレート (Mbps)。Wi-Fi が弱いと抜けが増えるので下げる")
     ap.add_argument("--encoder", default="auto", help="auto / nvh264enc / vah264enc / x264enc など")
     ap.add_argument("--passthrough", action="store_true",
                     help="PC で圧縮し直さず、カメラの H.264 をそのまま送る（カメラが H.264 を出すときだけ。試験的）")
+    ap.add_argument("--no-nack", action="store_true", help="抜けたパケットの送り直し（NACK/RTX）をしない")
+    ap.add_argument("--fec", type=int, default=0, help="誤り訂正（ULPFEC）の割合 %%（0 で無し）")
     ap.add_argument("--test", action="store_true", help="カメラの代わりに試験映像を送る")
+    ap.add_argument("--test-pattern", default="smpte", help="試験映像の模様（videotestsrc の pattern）")
     ap.add_argument("--list", action="store_true", help="カメラと圧縮の一覧を出して終わる")
     ap.add_argument("--log-dir", default=os.path.join(HERE, "logs"))
     args = ap.parse_args()
