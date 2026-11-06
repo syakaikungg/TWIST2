@@ -3,7 +3,11 @@
 #   bash <(curl -fsSL https://raw.githubusercontent.com/syakaikungg/TWIST2/claude/project-thread-vu08p3/deploy_real/vr_camera/pano_web/get_pano_web.sh)
 set -eu
 BRANCH="${PANO_BRANCH:-claude/project-thread-vu08p3}"
-BASE="https://raw.githubusercontent.com/syakaikungg/TWIST2/$BRANCH/deploy_real/vr_camera/pano_web"
+# ブランチ名のままだと GitHub 側の古い控え（数分）が返ることがあるので、最新のコミットに直して取る
+SHA="$(curl -fsSL -H 'Accept: application/vnd.github.sha' "https://api.github.com/repos/syakaikungg/TWIST2/commits/$BRANCH" 2>/dev/null || true)"
+case "$SHA" in ([0-9a-f]*) REF="$SHA" ;; (*) REF="$BRANCH" ;; esac
+echo "取得元: $BRANCH (${REF:0:7})"
+BASE="https://raw.githubusercontent.com/syakaikungg/TWIST2/$REF/deploy_real/vr_camera/pano_web"
 DIR="${1:-$HOME/pano_web}"
 mkdir -p "$DIR"
 cd "$DIR"
