@@ -37,7 +37,8 @@ try:
     gi.require_version("Gst", "1.0")
     gi.require_version("GstWebRTC", "1.0")
     gi.require_version("GstSdp", "1.0")
-    from gi.repository import GLib, Gst, GstSdp, GstWebRTC  # noqa: E402
+    gi.require_version("GstVideo", "1.0")
+    from gi.repository import GLib, Gst, GstSdp, GstVideo, GstWebRTC  # noqa: E402
 except (ImportError, ValueError) as e:
     sys.stderr.write(
         "GStreamer の Python 部品が見つかりません (%s)。\n"
@@ -475,7 +476,12 @@ class Sender:
         pipe = Gst.parse_launch(desc)
         jdec = pipe.get_by_name("jdec")
         if jdec is not None:
-            set_props(jdec, [("max-errors", -1)])  # 壊れたコマで止めない
+            # 壊れたコマで止めない。jpegdec の max-errors プロパティ（非推奨）は GStreamer 1.20 では効かず
+            # 約 12 枚で止まったので、映像デコーダー共通の設定で無制限にする
+            try:
+                GstVideo.VideoDecoder.set_max_errors(jdec, -1)
+            except Exception:  # noqa: BLE001
+                set_props(jdec, [("max-errors", -1)])
         enc = pipe.get_by_name("enc")
         done = set_props(enc, encoder_props(self.encoder, kbps, a.fps))
         set_props(pipe.get_by_name("pay"), [("aggregate-mode", "zero-latency")])
