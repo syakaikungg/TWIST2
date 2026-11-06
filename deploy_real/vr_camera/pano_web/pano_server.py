@@ -308,12 +308,19 @@ def _find_openssl():
 
 
 def _gen_cert_openssl(exe, cert_path, key_path, ips):
+    # 設定ファイルを自前で渡す（conda の openssl は環境を有効にしていないと openssl.cnf が見つからず失敗する）
     san = ",".join(["DNS:localhost", "IP:127.0.0.1"] + ["IP:%s" % ip for ip in ips])
+    cnf_path = os.path.join(os.path.dirname(cert_path), "openssl_pano.cnf")
+    with open(cnf_path, "w", encoding="ascii") as f:
+        f.write("[req]\ndistinguished_name = dn\nprompt = no\nx509_extensions = ext\n"
+                "[dn]\nCN = pano-web self-signed\n"
+                "[ext]\nsubjectAltName = %s\n" % san)
     cmd = [exe, "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
-           "-keyout", key_path, "-out", cert_path, "-days", "825", "-subj", "/CN=pano-web (self-signed)",
-           "-addext", "subjectAltName=" + san]
-    env = dict(os.environ, MSYS_NO_PATHCONV="1")  # Git for Windows の openssl が /CN を パスに変換しないように
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env)
+           "-keyout", key_path, "-out", cert_path, "-days", "825", "-config", cnf_path]
+    env = dict(os.environ, OPENSSL_CONF=cnf_path)
+    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    if r.returncode != 0:
+        raise RuntimeError("openssl で証明書を作れませんでした: %s" % r.stderr.decode("utf-8", "replace").strip()[-400:])
 
 
 def ensure_cert(cert_dir, ips):
@@ -330,9 +337,13 @@ def ensure_cert(cert_dir, ips):
         pass
     exe = _find_openssl()
     if exe:
-        _gen_cert_openssl(exe, cert_path, key_path, ips)
-        return cert_path, key_path
-    sys.exit("証明書を作れません。`python -m pip install cryptography` をしてからもう一度起動してください。")
+        try:
+            _gen_cert_openssl(exe, cert_path, key_path, ips)
+            return cert_path, key_path
+        except Exception as e:  # noqa: BLE001
+            log(str(e))
+    sys.exit("証明書を作れません。`py -3 -m pip install cryptography`（または python -m pip install cryptography）"
+             "をしてからもう一度起動してください。")
 
 
 THREE_FILE = os.path.join(HERE, "three.module.min.js")
