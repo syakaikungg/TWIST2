@@ -259,20 +259,29 @@ def set_props(el, props):
     return done
 
 
-def encoder_props(name, kbps, fps):
+def udp_send_buffer():
+    """PC の UDP 送信バッファの既定（バイト）。分からなければ Linux の既定 212992"""
+    try:
+        with open("/proc/sys/net/core/wmem_default") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return 212992
+
+
+def encoder_props(name, kbps, fps, vbv_frames=2):
     gop = max(1, int(round(fps * 2)))  # 2 秒ごとにキーフレーム（途中で乱れたら PICO の求めでも出す）
-    # 1 枚の大きさを「約 2 枚分のビット」までに抑える。キーフレームが大きいと PC の UDP の送信バッファ
+    # 1 枚の大きさを「約 vbv_frames 枚分のビット」までに抑える。キーフレームが大きいと PC の UDP の送信バッファ
     # （既定 約 210KB）からあふれてパケットが捨てられ、PICO で画面が緑になったり止まったりする
-    vbv_kbit = max(100, int(kbps * 2 / max(fps, 1)))
-    vbv_ms = max(20, int(2000 / max(fps, 1)))
+    vbv_kbit = max(100, int(kbps * vbv_frames / max(fps, 1)))
+    vbv_ms = max(20, int(1000 * vbv_frames / max(fps, 1)))
     if name == "nvh264enc":
         return [("preset", "low-latency-hq"), ("rc-mode", "cbr-ld-hq"), ("bitrate", kbps), ("max-bitrate", kbps),
                 ("vbv-buffer-size", vbv_kbit), ("gop-size", gop), ("bframes", 0), ("zerolatency", True),
-                ("rc-lookahead", 0), ("aud", False)]
+                ("rc-lookahead", 0), ("aud", False), ("spatial-aq", True)]
     if name in ("nvcudah264enc", "nvautogpuh264enc"):
         return [("preset", "p1"), ("tune", "ultra-low-latency"), ("rate-control", "cbr"), ("bitrate", kbps),
                 ("vbv-buffer-size", vbv_kbit), ("gop-size", gop), ("b-frames", 0), ("zero-reorder-delay", True),
-                ("rc-lookahead", 0)]
+                ("rc-lookahead", 0), ("spatial-aq", True)]
     if name in ("vah264lpenc", "vah264enc"):
         return [("rate-control", "cbr"), ("bitrate", kbps), ("cpb-size", vbv_kbit), ("key-int-max", gop),
                 ("b-frames", 0), ("target-usage", 7), ("ref-frames", 1)]
@@ -464,6 +473,8 @@ class Sender:
             ow, oh = int(a.width / a.scale) // 2 * 2, int(a.height / a.scale) // 2 * 2
             conv += " ! videoscale ! video/x-raw,width=%d,height=%d" % (ow, oh)
         profs = encoder_profiles(self.encoder)
+        if a.profile != "auto":
+            profile = a.profile  # 例: high（相手には 42e01f と伝えたまま中身を High にする。Chrome は再生できる）
         use_prof = profile if profile in profs else ("constrained-baseline" if "constrained-baseline" in profs else
                                                      ("baseline" if "baseline" in profs else None))
         enc_caps = "video/x-h264,profile=%s" % use_prof if use_prof else "video/x-h264"
@@ -483,7 +494,14 @@ class Sender:
             except Exception:  # noqa: BLE001
                 set_props(jdec, [("max-errors", -1)])
         enc = pipe.get_by_name("enc")
-        done = set_props(enc, encoder_props(self.encoder, kbps, a.fps))
+        wmem = udp_send_buffer()
+        vbv_frames = a.vbv_frames or (4 if wmem >= 1000000 else 2)
+        frame_kb = kbps * vbv_frames / max(a.fps, 1) / 8
+        if frame_kb * 1024 > wmem * 0.7:
+            log("注意: 1 枚の上限 %dKB が PC の送信バッファ %dKB に近いので、抜けやすいです。"
+                "sudo sysctl -w net.core.wmem_default=2097152 net.core.wmem_max=2097152 で広げてください"
+                % (frame_kb, wmem // 1024))
+        done = set_props(enc, encoder_props(self.encoder, kbps, a.fps, vbv_frames))
         set_props(pipe.get_by_name("pay"), [("aggregate-mode", "zero-latency")])
         log("圧縮の設定: %s %s profile=%s" % (self.encoder, " ".join(done), use_prof or "既定"))
         enc.get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, self._count_frame)
@@ -806,6 +824,10 @@ def main():
     ap.add_argument("--encoder", default="auto", help="auto / nvh264enc / vah264enc / x264enc など")
     ap.add_argument("--passthrough", action="store_true",
                     help="PC で圧縮し直さず、カメラの H.264 をそのまま送る（カメラが H.264 を出すときだけ。試験的）")
+    ap.add_argument("--profile", default="auto", choices=["auto", "constrained-baseline", "main", "high"],
+                    help="H.264 の profile。high にすると同じビットレートで画質が上がる（PICO で再生できるか要確認）")
+    ap.add_argument("--vbv-frames", type=float, default=0,
+                    help="1 枚の大きさの上限（何枚分のビットまで）。0 なら送信バッファに合わせて 2 か 4")
     ap.add_argument("--no-nack", action="store_true", help="抜けたパケットの送り直し（NACK/RTX）をしない")
     ap.add_argument("--fec", type=int, default=0, help="誤り訂正（ULPFEC）の割合 %%（0 で無し）")
     ap.add_argument("--test", action="store_true", help="カメラの代わりに試験映像を送る")

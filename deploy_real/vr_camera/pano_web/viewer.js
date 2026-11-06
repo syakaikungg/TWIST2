@@ -27,6 +27,9 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.xr.enabled = true;
 renderer.xr.setReferenceSpaceType('local');
 renderer.xr.setFoveation(0); // 周辺の解像度を落とさない（球に貼るだけなので重くない）
+// VR で描く画面の大きさの倍率（?fb=1.5 など）。上げると細かく見えるが重くなる
+const FB_SCALE = Math.min(2, Math.max(0.5, Number(params.get('fb')) || 1));
+renderer.xr.setFramebufferScaleFactor(FB_SCALE);
 document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
@@ -176,7 +179,10 @@ async function setupVrButton() {
       const s = await navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor'] });
       await renderer.xr.setSession(s);
       hud.dirty = true;
-      serverLog('viewer', 'VR に入りました');
+      const bl = renderer.xr.getBaseLayer && renderer.xr.getBaseLayer();
+      const fbw = bl ? (bl.framebufferWidth || bl.textureWidth) : '?';
+      const fbh = bl ? (bl.framebufferHeight || bl.textureHeight) : '?';
+      serverLog('viewer', `VR に入りました（描画 ${fbw}x${fbh}、倍率 ${FB_SCALE}）`);
       s.addEventListener('end', () => serverLog('viewer', 'VR を出ました'));
     } catch (e) {
       $('warn').textContent = 'VR に入れません: ' + e.message;
