@@ -13,7 +13,7 @@ mkdir -p "$DIR"
 cd "$DIR"
 for f in pano_server.py gst_sender.py start_gst.sh check_linux.sh get_pano_web.sh viewer.html viewer.js common.js \
          sender.html sender.js clock.html three.module.min.js THREE_LICENSE.txt README.md; do
-  curl -fsSL -o "$f.new" "$BASE/$f?nocache=$RANDOM$RANDOM" && mv -f "$f.new" "$f"
+  curl -fsSL --retry 6 --retry-delay 3 --retry-all-errors -o "$f.new" "$BASE/$f" && mv -f "$f.new" "$f"
   echo "取得: $f"
 done
 chmod +x start_gst.sh check_linux.sh get_pano_web.sh
