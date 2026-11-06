@@ -152,6 +152,7 @@ class Handler(BaseHTTPRequestHandler):
         self.do_GET()
 
     def do_GET(self):
+        note_client(self.client_address[0], "ページの読み込みあり")
         u = urlparse(self.path)
         q = parse_qs(u.query)
         path = u.path
@@ -228,13 +229,28 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, b"not found", "text/plain")
 
 
+_seen_clients = set()
+
+
+def note_client(ip, what):
+    """端末ごとに最初の 1 回だけログに出す（PICO から届いているかの確認用）"""
+    key = (ip, what)
+    if key in _seen_clients:
+        return
+    _seen_clients.add(key)
+    log("%s から %s" % (ip, what))
+
+
 class QuietServer(ThreadingHTTPServer):
     daemon_threads = True
 
     def handle_error(self, request, client_address):
-        # 自己署名の証明書を PICO がまだ受け入れていない間の TLS エラーなどは 1 行だけ
+        # 自己署名の証明書を PICO がまだ受け入れていない間の TLS エラーなどは端末ごとに 1 行だけ
         err = sys.exc_info()[1]
-        if isinstance(err, (ssl.SSLError, ConnectionError, TimeoutError)):
+        if isinstance(err, ssl.SSLError):
+            note_client(client_address[0], "接続あり（証明書の確認待ち。PICO で「詳細設定」→「アクセスする」）")
+            return
+        if isinstance(err, (ConnectionError, TimeoutError)):
             return
         log("リクエスト処理のエラー (%s): %r" % (client_address[0], err))
 
