@@ -367,6 +367,8 @@ class Sender:
         self.prev = None
         self.started_at = 0
         self.failed_encoders = set()
+        self.jpeg_decoder = "jpegdec"
+        self.warn_count = 0
         if args.passthrough:
             args.input_format = "h264"
             self.encoder = "passthrough"
@@ -424,8 +426,11 @@ class Sender:
             caps_s = "video/x-raw,%swidth=%d,height=%d,framerate=%s" % (("format=%s," % pix) if pix else "", w, h, rate)
             desc = "%s ! %s" % (src, caps_s)
         elif base == "mjpeg":
-            dec = "jpegdec"
-            desc = "%s ! image/jpeg,width=%d,height=%d,framerate=%s ! queue max-size-buffers=2 leaky=downstream ! %s" % (src, w, h, rate, dec)
+            # X5 は開いた直後に壊れた JPEG を出すことがある。jpegdec は壊れたコマを飛ばす設定にし、
+            # それでも止まるときは avdec_mjpeg（ffmpeg）に切り替える
+            dec = self.jpeg_decoder
+            desc = ("%s ! image/jpeg,width=%d,height=%d,framerate=%s ! queue max-size-buffers=2 leaky=downstream ! %s name=jdec"
+                    % (src, w, h, rate, dec))
         elif base == "h264" and a.passthrough:
             desc = "%s ! video/x-h264,width=%d,height=%d,framerate=%s" % (src, w, h, rate)
         elif base == "h264":
@@ -468,6 +473,9 @@ class Sender:
             "webrtcbin name=wb bundle-policy=max-bundle"
         ) % (self.src_desc, conv, self.encoder, enc_caps, pt)
         pipe = Gst.parse_launch(desc)
+        jdec = pipe.get_by_name("jdec")
+        if jdec is not None:
+            set_props(jdec, [("max-errors", -1)])  # 壊れたコマで止めない
         enc = pipe.get_by_name("enc")
         done = set_props(enc, encoder_props(self.encoder, kbps, a.fps))
         set_props(pipe.get_by_name("pay"), [("aggregate-mode", "zero-latency")])
@@ -620,15 +628,22 @@ class Sender:
 
     def _on_bus(self, bus, msg, session):
         t = msg.type
+        src = msg.src.get_name() if msg.src is not None else ""
         if t == Gst.MessageType.ERROR:
             err, dbg = msg.parse_error()
-            log("エラー (session %d): %s / %s" % (session, err.message, (dbg or "").split("\n")[0][:300]))
+            log("エラー (session %d, %s): %s / %s" % (session, src, err.message, (dbg or "").split("\n")[0][:300]))
             if session == self.session:
                 self.stop()
-                self._fallback_encoder()
+                if src == "enc":
+                    self._fallback_encoder()
+                elif src == "jdec" and self.jpeg_decoder == "jpegdec" and has("avdec_mjpeg"):
+                    self.jpeg_decoder = "avdec_mjpeg"
+                    log("JPEG の展開を avdec_mjpeg に切り替えます。PICO は数秒でつなぎ直します")
         elif t == Gst.MessageType.WARNING:
-            w, dbg = msg.parse_warning()
-            log("注意: %s" % w.message)
+            self.warn_count += 1
+            if self.warn_count <= 3 or self.warn_count in (10, 100, 1000):
+                w, dbg = msg.parse_warning()
+                log("注意 (%s, %d 回目): %s" % (src, self.warn_count, w.message))
 
     def _fallback_encoder(self):
         """ハード圧縮が動かなかったら次の候補に切り替える（PICO がつなぎ直したときから使う）"""
