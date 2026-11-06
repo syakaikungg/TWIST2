@@ -21,9 +21,12 @@ sender.html（Chrome の送信ページ）とは同時に使わない（どち�
 """
 
 import argparse
+import ctypes
+import ctypes.util
 import datetime
 import json
 import os
+import random
 import re
 import sys
 import threading
@@ -363,6 +366,22 @@ def is_2to1(caps):
     return any(abs(w / float(h) - 2.0) < 0.02 for _, w, h, _ in caps_modes(caps))
 
 
+_GOBJECT = None
+
+
+def _gobject_lib():
+    global _GOBJECT
+    if _GOBJECT is None:
+        go = ctypes.CDLL(ctypes.util.find_library("gobject-2.0") or "libgobject-2.0.so.0")
+        go.g_object_get.restype = None
+        go.g_object_set.restype = None
+        go.g_object_unref.argtypes = [ctypes.c_void_p]
+        ctypes.pythonapi.PyCapsule_GetPointer.restype = ctypes.c_void_p
+        ctypes.pythonapi.PyCapsule_GetPointer.argtypes = [ctypes.py_object, ctypes.c_char_p]
+        _GOBJECT = go
+    return _GOBJECT
+
+
 class Sender:
     def __init__(self, args):
         self.args = args
@@ -370,6 +389,7 @@ class Sender:
         self.pipe = None
         self.wb = None
         self.session = 0
+        self.ssrc = 0
         self.answer_sent = False
         self.candidates = []
         self.frames = 0
@@ -454,16 +474,16 @@ class Sender:
         return desc, info
 
     # ---- pipeline
-    def build_pipeline(self, pt, profile):
+    def build_pipeline(self, pt, profile, ssrc):
         a = self.args
         kbps = int(a.mbps * 1000)
         if a.passthrough:
             desc = (
                 "%s ! h264parse name=enc config-interval=-1 ! queue max-size-buffers=30 leaky=downstream ! "
-                "rtph264pay name=pay config-interval=-1 mtu=1200 ! "
-                "application/x-rtp,media=video,encoding-name=H264,payload=%d,clock-rate=90000 ! "
+                "rtph264pay name=pay config-interval=-1 mtu=1200 ssrc=%d ! "
+                "application/x-rtp,media=video,encoding-name=H264,payload=%d,clock-rate=90000,ssrc=(uint)%d ! "
                 "webrtcbin name=wb bundle-policy=max-bundle"
-            ) % (self.src_desc, pt)
+            ) % (self.src_desc, ssrc, pt, ssrc)
             pipe = Gst.parse_launch(desc)
             set_props(pipe.get_by_name("pay"), [("aggregate-mode", "zero-latency")])
             pipe.get_by_name("enc").get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, self._count_frame)
@@ -480,10 +500,10 @@ class Sender:
         enc_caps = "video/x-h264,profile=%s" % use_prof if use_prof else "video/x-h264"
         desc = (
             "%s ! queue max-size-buffers=1 leaky=downstream ! %s ! %s name=enc ! %s ! h264parse ! "
-            "rtph264pay name=pay config-interval=-1 mtu=1200 ! "
-            "application/x-rtp,media=video,encoding-name=H264,payload=%d,clock-rate=90000 ! "
+            "rtph264pay name=pay config-interval=-1 mtu=1200 ssrc=%d ! "
+            "application/x-rtp,media=video,encoding-name=H264,payload=%d,clock-rate=90000,ssrc=(uint)%d ! "
             "webrtcbin name=wb bundle-policy=max-bundle"
-        ) % (self.src_desc, conv, self.encoder, enc_caps, pt)
+        ) % (self.src_desc, conv, self.encoder, enc_caps, ssrc, pt, ssrc)
         pipe = Gst.parse_launch(desc)
         jdec = pipe.get_by_name("jdec")
         if jdec is not None:
@@ -543,12 +563,16 @@ class Sender:
             return False
         pt, plid, prof = chosen
         log("PICO から接続要求 (session %d)。H.264 pt=%d profile-level-id=%s" % (session, pt, plid))
+        # 映像の番号（SSRC）を先に決めて応答に必ず書く。決めずにいると、カメラの1枚目より先に応答を作った回は
+        # 番号 0 で伝わり（a=ssrc-group:FID 0 ...）、PICO が実際の映像を受け取らずに「つながったのに映らない」になる
+        self.ssrc = random.randint(1, 0xFFFFFFF0)
         try:
-            self.pipe = self.build_pipeline(pt, prof)
+            self.pipe = self.build_pipeline(pt, prof, self.ssrc)
         except GLib.Error as e:
             log("パイプラインを作れません: %s" % e.message)
             return False
         self.wb = self.pipe.get_by_name("wb")
+        self._disable_upnp()
         bus = self.pipe.get_bus()
         bus.add_signal_watch()
         bus.connect("message", self._on_bus, session)
@@ -561,7 +585,7 @@ class Sender:
             # viewer の offer にある H.264 の行に合わせる（profile-level-id は相手の値をそのまま使う）
             tr.set_property("codec-preferences", Gst.Caps.from_string(
                 "application/x-rtp,media=video,encoding-name=H264,payload=%d,clock-rate=90000,"
-                "packetization-mode=(string)1" % pt))
+                "packetization-mode=(string)1,ssrc=(uint)%d" % (pt, self.ssrc)))
             # Wi-Fi で抜けたパケットを PICO の求めに応じて送り直す（NACK / RTX）。抜けると画面が緑になる
             if not self.args.no_nack and tr.find_property("do-nack") is not None:
                 tr.set_property("do-nack", True)
@@ -576,6 +600,25 @@ class Sender:
         offer = GstWebRTC.WebRTCSessionDescription.new(GstWebRTC.WebRTCSDPType.OFFER, msg)
         self.wb.emit("set-remote-description", offer, Gst.Promise.new_with_change_func(self._on_remote_set, session))
         return False
+
+    def _disable_upnp(self):
+        """ルーターの UPnP でポートを開けない（PICO は同じ LAN にいるので不要。公開 IP の候補も出なくなる）。
+        webrtcbin の ice-agent を Python から get_property すると参照の数が狂って落ちるので、GObject を直接呼ぶ"""
+        try:
+            go = _gobject_lib()
+            wbp = ctypes.pythonapi.PyCapsule_GetPointer(self.wb.__gpointer__, None)
+            ice = ctypes.c_void_p()
+            go.g_object_get(ctypes.c_void_p(wbp), b"ice-agent", ctypes.byref(ice), None)
+            if not ice.value:
+                return
+            agent = ctypes.c_void_p()
+            go.g_object_get(ice, b"agent", ctypes.byref(agent), None)
+            if agent.value:
+                go.g_object_set(agent, b"upnp", ctypes.c_int(0), None)
+                go.g_object_unref(agent)
+            go.g_object_unref(ice)
+        except Exception as e:  # noqa: BLE001
+            log("UPnP を止められませんでした（映像には影響なし）: %s" % e)
 
     def _retry_session(self, session, desc):
         if session == self.session and self.pipe is None:
@@ -626,6 +669,8 @@ class Sender:
                 f.write(sdp)
             feats = [n for n, k in (("再送", "rtx/90000"), ("FEC", "ulpfec/90000"), ("PLI", "nack pli")) if k in sdp]
             log("送り直しの仕組み: %s" % ("・".join(feats) or "なし"))
+            if ("a=ssrc:%d " % self.ssrc) not in sdp or "FID 0 " in sdp:
+                log("注意: 応答に映像の番号 (ssrc=%d) が正しく入っていません。PICO に映らないときはこれが原因です" % self.ssrc)
         except OSError:
             pass
         try:
