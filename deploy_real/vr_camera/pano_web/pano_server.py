@@ -256,6 +256,60 @@ class QuietServer(ThreadingHTTPServer):
         log("リクエスト処理のエラー (%s): %r" % (client_address[0], err))
 
 
+class HttpsServer(QuietServer):
+    """https の待ち受け。http:// で開かれたら https:// に転送する（PICO で https を付け忘れても開けるように）"""
+
+    def __init__(self, addr, handler, ctx):
+        super().__init__(addr, handler)
+        self.ctx = ctx
+
+    def finish_request(self, request, client_address):
+        ip = client_address[0]
+        try:
+            request.settimeout(10)
+            first = request.recv(1, socket.MSG_PEEK)
+        except OSError:
+            return
+        if not first:
+            return
+        if first[0] != 0x16:  # TLS の最初のバイトではない = http:// で来た
+            note_client(ip, "http:// で開こうとしたので https:// に転送しました")
+            self._redirect_to_https(request)
+            return
+        try:
+            tls = self.ctx.wrap_socket(request, server_side=True)
+        except ssl.SSLError:
+            note_client(ip, "接続あり（証明書の確認待ち。PICO で「詳細設定」→「アクセスする」）")
+            return
+        except OSError:
+            return
+        try:
+            tls.settimeout(60)
+            super().finish_request(tls, client_address)
+        finally:
+            try:
+                tls.close()
+            except OSError:
+                pass
+
+    def _redirect_to_https(self, sock):
+        try:
+            head = sock.recv(4096).decode("latin-1", "replace")
+            parts = head.split("\r\n")[0].split(" ")
+            path = parts[1] if len(parts) > 1 and parts[1].startswith("/") else "/"
+            host = ""
+            for line in head.split("\r\n")[1:]:
+                if line.lower().startswith("host:"):
+                    host = line.split(":", 1)[1].strip()
+            if not host:
+                host = "%s:%d" % (sock.getsockname()[0], self.server_address[1])
+            body = ("HTTP/1.1 301 Moved Permanently\r\nLocation: https://%s%s\r\n"
+                    "Content-Length: 0\r\nConnection: close\r\n\r\n" % (host, path))
+            sock.sendall(body.encode("latin-1"))
+        except OSError:
+            pass
+
+
 def make_handler(index_page):
     return type("H_" + index_page.strip("/").replace(".", "_"), (Handler,), {"index_page": index_page})
 
@@ -417,9 +471,8 @@ def main():
 
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(cert_path, key_path)
-    https = QuietServer((args.bind, args.https_port), make_handler("/viewer.html"))
-    # ハンドシェイクは各リクエストのスレッドで行う（受付スレッドが止まらないように）
-    https.socket = ctx.wrap_socket(https.socket, server_side=True, do_handshake_on_connect=False)
+    https = HttpsServer((args.bind, args.https_port), make_handler("/viewer.html"), ctx)
+    # TLS のハンドシェイクは各リクエストのスレッドで行う（HttpsServer.finish_request）
 
     http = QuietServer(("127.0.0.1", args.http_port), make_handler("/sender.html"))
 

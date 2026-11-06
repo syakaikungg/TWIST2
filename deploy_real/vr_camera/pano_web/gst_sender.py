@@ -338,6 +338,14 @@ def pick_h264_pt(sdp_text):
 
 
 # ---------------------------------------------------------------- session
+class CameraMissing(Exception):
+    pass
+
+
+def is_2to1(caps):
+    return any(abs(w / float(h) - 2.0) < 0.02 for _, w, h, _ in caps_modes(caps))
+
+
 class Sender:
     def __init__(self, args):
         self.args = args
@@ -356,7 +364,11 @@ class Sender:
             self.encoder = "passthrough"
         else:
             self.encoder = pick_encoder(args.encoder)
-        self.src_desc, self.src_info = self.build_source()
+        self.missing_logged = None
+        try:
+            self.src_desc, self.src_info = self.build_source()
+        except CameraMissing as e:
+            self.src_desc, self.src_info = None, "まだ見つかりません（%s）" % e
         if args.passthrough:
             log("圧縮: しない（カメラが圧縮した H.264 をそのまま送る・試験的）")
         else:
@@ -377,12 +389,19 @@ class Sender:
                          " ! video/x-h264,profile=high" % int(a.mbps * 1000))
             return desc, "試験映像 %dx%d %sfps" % (a.width, a.height, a.fps)
         cams = list_cameras()
-        if not cams:
-            raise SystemExit("カメラが見つかりません。X5 を USB でつなぎ、USB モードを「ウェブカメラ」にしてください（v4l2-ctl --list-devices でも確認）")
         if a.device != "auto":
-            cam = next((c for c in cams if c[1] == a.device), None) or (a.device, a.device, None)
+            cam = next((c for c in cams if c[1] == a.device), None)
+            if cam is None and not os.path.exists(a.device):
+                raise CameraMissing("%s がありません" % a.device)
+            cam = cam or (a.device, a.device, None)
         else:
-            cam = next((c for c in cams if re.search(r"insta360|360|theta", c[0], re.I)), None) or cams[0]
+            # 360度カメラ（名前か 2:1 の解像度で判断）だけを使う。PC 内蔵カメラには切り替えない
+            cam = (next((c for c in cams if re.search(r"insta360|theta|360", c[0], re.I)), None)
+                   or next((c for c in cams if is_2to1(c[2])), None))
+            if cam is None:
+                names = ", ".join("%s (%s)" % (c[0], c[1]) for c in cams) or "なし"
+                raise CameraMissing("360度カメラが見つかりません。X5 の電源と USB モード「ウェブカメラ」を確認してください。"
+                                    "見えているカメラ: %s" % names)
         name, path, caps = cam
         mode = pick_mode(caps, a.width, a.height, a.fps, a.input_format) if caps is not None else None
         if mode is None:
@@ -462,6 +481,16 @@ class Sender:
     def start_session(self, session, desc):
         self.stop()
         self.session = session
+        if not self.args.test:  # 接続のたびにカメラを探し直す（X5 の抜き差し・スリープ対策）
+            try:
+                self.src_desc, self.src_info = self.build_source()
+            except CameraMissing as e:
+                if self.missing_logged != session:
+                    log("%s（見つかるまで 2 秒ごとに探します）" % e)
+                    self.missing_logged = session
+                GLib.timeout_add(2000, self._retry_session, session, desc)
+                return False
+            log("カメラ: %s" % self.src_info)
         self.answer_sent = False
         self.candidates = []
         self.prev = None
@@ -498,6 +527,11 @@ class Sender:
         GstSdp.sdp_message_parse_buffer(sdp_text.encode("utf-8"), msg)
         offer = GstWebRTC.WebRTCSessionDescription.new(GstWebRTC.WebRTCSDPType.OFFER, msg)
         self.wb.emit("set-remote-description", offer, Gst.Promise.new_with_change_func(self._on_remote_set, session))
+        return False
+
+    def _retry_session(self, session, desc):
+        if session == self.session and self.pipe is None:
+            self.start_session(session, desc)
         return False
 
     def _on_remote_set(self, promise, session, *_):
