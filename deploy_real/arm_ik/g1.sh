@@ -14,9 +14,10 @@
 #   g1.sh status                            what runs on the G1 (read only): teleop state, ports, camera
 #   g1.sh ssh                               a shell on the G1
 # Settings (environment): G1_HOST (default unitree@192.168.123.164), G1_KEY (default ~/.ssh/id_ed25519_g1),
-# MAX_TEMP (passed to run_live.sh: 50..70 C, default 70), WAIST_CORRECT (passed to run_live.sh: empty = the bridge's
-# integral waist correction off, the default since 2026-11-10; roll,pitch = on as before), CAM_LISTEN (passed to
-# after_boot.sh: address:port the camera waits on, default 0.0.0.0:13579).
+# MAX_TEMP (passed to run_live.sh: 50..70 C, default 70; none = no temperature stop, one measurement run only),
+# WAIST_CORRECT (passed to run_live.sh: empty = the bridge's integral waist correction off, the default since 2026-11-10; roll,pitch = on as before), CAM_LISTEN (passed to
+# after_boot.sh: address:port the camera waits on, default 0.0.0.0:13579), TEMP_PAUSE / TEMP_RESUME (passed to
+# run_live.sh: at TEMP_PAUSE C the arms glide back to the start pose and pause until TEMP_RESUME C; default off (0) / 60).
 # Setting up a new PC (wired IP, SSH key): README.md, "操作用のPC".
 set -u
 HOST=${G1_HOST:-unitree@192.168.123.164}
@@ -27,7 +28,7 @@ if [ ! -r "$KEY" ]; then
   echo "  ssh-keygen -t ed25519 -f $KEY && ssh-copy-id -i $KEY.pub $HOST"
   exit 1
 fi
-usage() { sed -n 4,20p "$0"; exit 1; }
+usage() { sed -n 4,22p "$0"; exit 1; }
 TTY=(); [ -t 0 ] && TTY=(-t)    # a terminal only when there is one (Claude runs this without one)
 
 cmd=${1:-}
@@ -53,9 +54,15 @@ case "$cmd" in
     case "$tool" in hand|drill) ;; *) echo "tool must be hand or drill"; exit 1 ;; esac
     temp=""
     if [ -n "${MAX_TEMP:-}" ]; then
-      [[ "$MAX_TEMP" =~ ^[0-9]+$ ]] || { echo "MAX_TEMP must be a whole number (50..70)"; exit 1; }
+      [[ "$MAX_TEMP" =~ ^([0-9]+|none)$ ]] || { echo "MAX_TEMP must be a whole number (50..70) or none"; exit 1; }
       temp="MAX_TEMP=$MAX_TEMP "
     fi
+    for v in TEMP_PAUSE TEMP_RESUME; do
+      if [ -n "${!v:-}" ]; then
+        [[ "${!v}" =~ ^[0-9]+$ ]] || { echo "$v must be a whole number"; exit 1; }
+        temp="${temp}$v=${!v} "
+      fi
+    done
     if [ -n "${WAIST_CORRECT:-}" ]; then
       case "$WAIST_CORRECT" in roll|pitch|roll,pitch|pitch,roll) ;; *) echo "WAIST_CORRECT must be roll, pitch or roll,pitch"; exit 1 ;; esac
       temp="${temp}WAIST_CORRECT=$WAIST_CORRECT "

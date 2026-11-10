@@ -10,7 +10,7 @@ NexTech Week 2026 秋の展示用。G1 の内蔵PC（`~/nextech/arm_ik/`）で�
 | `sim_drill.py` | シミュレーターのドリルの形と回し方（ビューアーからも使う） |
 | `sim_viewer.py` | ノートPC（WSL）のビューアー。G1の `stream_sim.py` を SSH で動かして関節角を受け取り、MuJoCo の窓に描く。`sim_drill.py` と同じフォルダ（`~/nextech_viewer/`）に置く |
 | `sim_run.sh` / `sim_live_bg.sh` | シミュレーターでの自動テスト / PICO で操作する live |
-| `run_live.sh` | 実機。`run_live.sh dry` はロボットに送らずに動かす（既定60秒）、`run_live.sh send` は `--send` で送る（既定180秒、本人の確認後にだけ使う）。上限は既定0.5 rad/s、手先0.6 m/s。4番目の引数は右手首の当たり判定（`hand` が既定、ドリルを付けたら `drill`）。温度の上限は `MAX_TEMP=65 bash run_live.sh send` のように変えられる（50〜70℃、既定70℃。11/4 に60→65℃、11/10 に本人の依頼で65→70℃） |
+| `run_live.sh` | 実機。`run_live.sh dry` はロボットに送らずに動かす（既定60秒）、`run_live.sh send` は `--send` で送る（既定180秒、本人の確認後にだけ使う）。上限は既定0.5 rad/s、手先0.6 m/s。4番目の引数は右手首の当たり判定（`hand` が既定、ドリルを付けたら `drill`）。温度の上限は `MAX_TEMP=65 bash run_live.sh send` のように変えられる（50〜70℃、既定70℃。11/4 に60→65℃、11/10 に本人の依頼で65→70℃）。`MAX_TEMP=none` は温度で止めない測定用（11/10 本人の依頼、映像の警告は65℃から、吊って左 X をすぐ押せるときだけ）。`TEMP_PAUSE=65` で、その温度で最初の姿勢に戻って一時停止し、`TEMP_RESUME`（60℃）以下で A を受け付ける（既定はオフ） |
 | `stop.sh` | 非常停止（Redis `teleop_stop`） |
 | `after_boot.sh` | G1 を再起動したあとの準備（Redis と PC Service、頭カメラの USB 省電力オフ、頭カメラ → PICO を `0.0.0.0:13579` で待つ＝有線と Wi-Fi の両方。`CAM_LISTEN` で変えられる）。`install_autostart.sh` のあとは sudo を使わず、パスワードも聞かない。ロボットは動かさない |
 | `install_autostart.sh` | G1 で1回だけ（sudo のパスワード1回、`g1.sh autostart`）。Docker の Redis と PC Service に restart=unless-stopped を付けて G1 の起動で自動で立ち上げ、頭カメラの USB 省電力オフを udev の規則にする。権限（sudoers・グループ・SSH）は変えない。`--check` で今の状態、`--undo` で元に戻す |
