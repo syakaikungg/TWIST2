@@ -2,8 +2,11 @@
 # Run on the operator PC (Ubuntu, or WSL Ubuntu on the Windows laptop), NOT on the G1. The teleop itself runs on the
 # G1's onboard PC; this only starts and stops it over SSH.
 #   g1.sh up                                after a G1 (re)boot: Redis + PC Service, head camera USB power saving off,
-#                                           head camera -> PICO (after_boot.sh). Asks for the G1 sudo password once.
-#                                           Moves nothing.
+#                                           head camera -> PICO on 0.0.0.0:13579 (after_boot.sh). Moves nothing.
+#                                           No password once `g1.sh autostart` has been done; before that it asks for
+#                                           the G1 sudo password once (only in a terminal).
+#   g1.sh autostart [--check|--undo]        ONCE: install_autostart.sh (sudo password once): Redis + PC Service start
+#                                           with the G1 and a udev rule turns the camera USB power saving off.
 #   g1.sh dry  [max_vel] [seconds] [tool]   run_live.sh dry: IK + bridge, the bridge only logs (nothing is sent)
 #   g1.sh send [max_vel] [seconds] [tool]   run_live.sh send: the arms MOVE. Only after an explicit go, with the
 #                                           robot hanging on its rope while testing. Defaults 0.5 rad/s, 180 s, hand.
@@ -12,7 +15,8 @@
 #   g1.sh ssh                               a shell on the G1
 # Settings (environment): G1_HOST (default unitree@192.168.123.164), G1_KEY (default ~/.ssh/id_ed25519_g1),
 # MAX_TEMP (passed to run_live.sh: 50..70 C, default 70), WAIST_CORRECT (passed to run_live.sh: empty = the bridge's
-# integral waist correction off, the default since 2026-11-10; roll,pitch = on as before).
+# integral waist correction off, the default since 2026-11-10; roll,pitch = on as before), CAM_LISTEN (passed to
+# after_boot.sh: address:port the camera waits on, default 0.0.0.0:13579).
 # Setting up a new PC (wired IP, SSH key): README.md, "操作用のPC".
 set -u
 HOST=${G1_HOST:-unitree@192.168.123.164}
@@ -23,13 +27,24 @@ if [ ! -r "$KEY" ]; then
   echo "  ssh-keygen -t ed25519 -f $KEY && ssh-copy-id -i $KEY.pub $HOST"
   exit 1
 fi
-usage() { sed -n 4,16p "$0"; exit 1; }
+usage() { sed -n 4,20p "$0"; exit 1; }
+TTY=(); [ -t 0 ] && TTY=(-t)    # a terminal only when there is one (Claude runs this without one)
 
 cmd=${1:-}
 [ $# -gt 0 ] && shift
 case "$cmd" in
   up)
-    exec ssh -t -i "$KEY" -o ConnectTimeout=8 "$HOST" "bash ~/nextech/arm_ik/after_boot.sh"
+    cl=""
+    if [ -n "${CAM_LISTEN:-}" ]; then
+      [[ "$CAM_LISTEN" =~ ^[0-9.]+:[0-9]+$ ]] || { echo "CAM_LISTEN must be address:port (e.g. 0.0.0.0:13579)"; exit 1; }
+      cl="CAM_LISTEN=$CAM_LISTEN "
+    fi
+    exec ssh "${TTY[@]}" -i "$KEY" -o ConnectTimeout=8 "$HOST" "${cl}bash ~/nextech/arm_ik/after_boot.sh"
+    ;;
+  autostart)
+    opt=${1:-}
+    case "$opt" in ""|--check|--undo) ;; *) echo "autostart takes nothing, --check or --undo"; exit 1 ;; esac
+    exec ssh -t -i "$KEY" -o ConnectTimeout=8 "$HOST" "bash ~/nextech/arm_ik/install_autostart.sh $opt"
     ;;
   dry|send)
     vel=${1:-0.5}; secs=${2:-$([ "$cmd" = send ] && echo 180 || echo 60)}; tool=${3:-hand}

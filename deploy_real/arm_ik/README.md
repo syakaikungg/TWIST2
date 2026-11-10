@@ -12,8 +12,9 @@ NexTech Week 2026 秋の展示用。G1 の内蔵PC（`~/nextech/arm_ik/`）で�
 | `sim_run.sh` / `sim_live_bg.sh` | シミュレーターでの自動テスト / PICO で操作する live |
 | `run_live.sh` | 実機。`run_live.sh dry` はロボットに送らずに動かす（既定60秒）、`run_live.sh send` は `--send` で送る（既定180秒、本人の確認後にだけ使う）。上限は既定0.5 rad/s、手先0.6 m/s。4番目の引数は右手首の当たり判定（`hand` が既定、ドリルを付けたら `drill`）。温度の上限は `MAX_TEMP=65 bash run_live.sh send` のように変えられる（50〜70℃、既定70℃。11/4 に60→65℃、11/10 に本人の依頼で65→70℃） |
 | `stop.sh` | 非常停止（Redis `teleop_stop`） |
-| `after_boot.sh` | G1 を再起動したあとの準備（Redis と PC Service、頭カメラの USB 省電力オフ、頭カメラ → PICO）。パスワードは1回。ロボットは動かさない |
-| `g1.sh` | 操作用のPC（Ubuntu、またはノートPCの WSL）で使う。`g1.sh up`（= after_boot.sh）、`g1.sh dry\|send [速さ] [秒] [tool]`（= run_live.sh）、`g1.sh stop`（= stop.sh）、`g1.sh status`、`g1.sh ssh` を SSH で G1 に頼むだけ |
+| `after_boot.sh` | G1 を再起動したあとの準備（Redis と PC Service、頭カメラの USB 省電力オフ、頭カメラ → PICO を `0.0.0.0:13579` で待つ＝有線と Wi-Fi の両方。`CAM_LISTEN` で変えられる）。`install_autostart.sh` のあとは sudo を使わず、パスワードも聞かない。ロボットは動かさない |
+| `install_autostart.sh` | G1 で1回だけ（sudo のパスワード1回、`g1.sh autostart`）。Docker の Redis と PC Service に restart=unless-stopped を付けて G1 の起動で自動で立ち上げ、頭カメラの USB 省電力オフを udev の規則にする。権限（sudoers・グループ・SSH）は変えない。`--check` で今の状態、`--undo` で元に戻す |
+| `g1.sh` | 操作用のPC（Ubuntu、またはノートPCの WSL）で使う。`g1.sh up`（= after_boot.sh）、`g1.sh autostart`（= install_autostart.sh、1回だけ）、`g1.sh dry\|send [速さ] [秒] [tool]`（= run_live.sh）、`g1.sh stop`（= stop.sh）、`g1.sh status`、`g1.sh ssh` を SSH で G1 に頼むだけ |
 | `render_front.py` | 記録（`stream_sim.py` の出力）か arm_sim の CSV から、前などから見た動画を作る（G1 では EGL＋imageio-ffmpeg） |
 | `check_tool_gap.py` | IK か arm_sim のログから、ドリル（か手）が体と反対の腕にどこまで近づいたかを出す |
 | `compare_replay.py` | 同じ入力の2回の IK の CSV（`--replay` の新旧など）で、追従中の手の位置の差を出す |
@@ -30,7 +31,8 @@ NexTech Week 2026 秋の展示用。G1 の内蔵PC（`~/nextech/arm_ik/`）で�
 3. このスクリプト：`git clone -b claude/project-thread-fv7uja https://github.com/syakaikungg/TWIST2.git`（公開リポジトリなのでログイン不要）。`bash TWIST2/deploy_real/arm_ik/g1.sh status` で G1 の様子が出れば準備完了
 
 いつもの流れ
-- G1 の電源を入れたら：`bash g1.sh up`（sudo のパスワードを1回）→ PICO の XRobot → Remote Vision → ZEDMINI → Listen → `192.168.123.164` → Confirm
+- 1回だけ：`bash g1.sh autostart`（G1 の sudo のパスワードを1回）。これで、次からの `g1.sh up` はパスワードを聞かない（Claude が SSH で実行できる）
+- G1 の電源を入れたら：`bash g1.sh up` → PICO の XRobot → PC Service と Remote Vision → ZEDMINI → Listen → 有線なら `192.168.123.164`、Wi-Fi なら G1 の Wi-Fi のアドレス（`g1.sh up` の最後に出る）→ Confirm。`g1.sh autostart` の前は、`g1.sh up` が sudo のパスワードを1回聞く（端末からだけ）
 - 腕を動かす：`bash g1.sh send 0.5 300`（ロボットに送る。止めるのは PICO の左 X、または別の端末で `bash g1.sh stop`）
 - 送らずに試す：`bash g1.sh dry`
 
