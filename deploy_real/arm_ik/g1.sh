@@ -11,7 +11,8 @@
 #   g1.sh status                            what runs on the G1 (read only): teleop state, ports, camera
 #   g1.sh ssh                               a shell on the G1
 # Settings (environment): G1_HOST (default unitree@192.168.123.164), G1_KEY (default ~/.ssh/id_ed25519_g1),
-# MAX_TEMP (passed to run_live.sh: 50..65 C, default 65).
+# MAX_TEMP (passed to run_live.sh: 50..65 C, default 65), WAIST_CORRECT (passed to run_live.sh: empty = the bridge's
+# integral waist correction off, the default since 2026-11-10; roll,pitch = on as before).
 # Setting up a new PC (wired IP, SSH key): README.md, "操作用のPC".
 set -u
 HOST=${G1_HOST:-unitree@192.168.123.164}
@@ -39,6 +40,10 @@ case "$cmd" in
     if [ -n "${MAX_TEMP:-}" ]; then
       [[ "$MAX_TEMP" =~ ^[0-9]+$ ]] || { echo "MAX_TEMP must be a whole number (50..65)"; exit 1; }
       temp="MAX_TEMP=$MAX_TEMP "
+    fi
+    if [ -n "${WAIST_CORRECT:-}" ]; then
+      case "$WAIST_CORRECT" in roll|pitch|roll,pitch|pitch,roll) ;; *) echo "WAIST_CORRECT must be roll, pitch or roll,pitch"; exit 1 ;; esac
+      temp="${temp}WAIST_CORRECT=$WAIST_CORRECT "
     fi
     exec "${SSH[@]}" "${temp}bash ~/nextech/arm_ik/run_live.sh $cmd $vel $secs $tool"
     ;;

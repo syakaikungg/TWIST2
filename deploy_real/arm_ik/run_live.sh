@@ -9,6 +9,9 @@
 # tool: what the IK's collision avoidance puts on the right wrist: hand (the hand is still on, default until the
 # drill adapter is mounted) or drill (the provisional drill shape of sim_drill.py).
 # The waist is brought slowly to 0 (upright) in roll and pitch from right A on (bridge default --waist-level).
+# The bridge's integral waist correction is OFF by default since 2026-11-10 (WAIST_CORRECT=roll,pitch turns it on as
+# before): with the tool on the right wrist it wound up to its 0.15 rad limit while the waist did not move, the waist
+# pitch torque went 4 -> 24 Nm and the motor 54 -> 66 C in 25 s. For the exhibition the robot hangs with the legs limp.
 # Motor temperature limit of the bridge: MAX_TEMP (default 65 C since 2026-11-04, was 60; e.g. MAX_TEMP=60 bash
 # run_live.sh send). A motor the bridge commands at MAX_TEMP - 5 shows a warning on the PICO; above MAX_TEMP the
 # bridge stops (3 s release). A leg motor (the robot's own) at 70 C or more only shows a warning.
@@ -24,6 +27,8 @@ esac
 VEL=${2:-0.5}
 TOOL=${4:-hand}
 MAX_TEMP=${MAX_TEMP:-65}
+WAIST_CORRECT=${WAIST_CORRECT-}
+case "$WAIST_CORRECT" in ""|roll|pitch|roll,pitch|pitch,roll) ;; *) echo "WAIST_CORRECT must be empty, roll, pitch or roll,pitch"; exit 1 ;; esac
 case "$MAX_TEMP" in 5[0-9]|6[0-5]) ;; *) echo "MAX_TEMP must be 50..65"; exit 1 ;; esac
 case "$TOOL" in hand|drill) ;; *) echo "tool must be hand or drill"; exit 1 ;; esac
 cd ~/nextech/arm_ik || exit 1
@@ -34,14 +39,15 @@ export CYCLONEDDS_HOME=/home/unitree/cyclonedds_ws/install/cyclonedds
 export LD_LIBRARY_PATH=$CYCLONEDDS_HOME/lib:${LD_LIBRARY_PATH:-}
 TS=$(date +%Y%m%d_%H%M%S)
 L=~/nextech_setup/logs
-echo "mode $MODE, max-vel $VEL rad/s, $SECS s, tool $TOOL, max-temp $MAX_TEMP C"
-nohup python3 -u arm_sdk_bridge.py $SEND --max-vel "$VEL" --duration "$SECS" --max-temp "$MAX_TEMP" > "$L/live_bridge_${MODE}_$TS.txt" 2>&1 < /dev/null &
+echo "mode $MODE, max-vel $VEL rad/s, $SECS s, tool $TOOL, max-temp $MAX_TEMP C, waist correction ${WAIST_CORRECT:-off}"
+nohup python3 -u arm_sdk_bridge.py $SEND --max-vel "$VEL" --duration "$SECS" --max-temp "$MAX_TEMP" \
+  --waist-correct "$WAIST_CORRECT" > "$L/live_bridge_${MODE}_$TS.txt" 2>&1 < /dev/null &
 echo "bridge pid $!"
 sleep 4
 nohup ~/miniforge3/envs/gmr/bin/python -u arm_ik_dryrun.py --arms both --duration $((SECS - 5)) \
   --max-vel "$VEL" --hand-speed 0.6 --tool "$TOOL" > "$L/live_ik_${MODE}_$TS.txt" 2>&1 < /dev/null &
 echo "ik pid $!"
 sleep 4
-echo "--- bridge ---"; grep -E 'lowstate|SEND|LOG ONLY|kp=|monitors|waist target' "$L/live_bridge_${MODE}_$TS.txt"
+echo "--- bridge ---"; grep -E 'lowstate|SEND|LOG ONLY|kp=|monitors|waist target|waist correction' "$L/live_bridge_${MODE}_$TS.txt"
 echo "--- ik ---"; grep -E 'arm_ik_dryrun:|cleared' "$L/live_ik_${MODE}_$TS.txt"
 echo "logs: $L/live_bridge_${MODE}_$TS.txt $L/live_ik_${MODE}_$TS.txt"
