@@ -57,6 +57,7 @@ except (ValueError, ImportError):
     GstVideo = None
 
 from status_overlay import StatusOverlay, has_japanese_font  # noqa: E402
+from battery_dds import BatteryReader  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +275,13 @@ def build_pipeline_desc(args, out_w, out_h, bitrate, hevc):
         ovl = ('textoverlay name=ovl text="" auto-resize=false font-desc="%s %d" '
                'valignment=%s halignment=center ypad=%d shaded-background=true wait-text=false ! '
                % (args.overlay_font, size, args.overlay_pos, max(4, int(eye_h * 0.03))))
+        # G1 のバッテリー残量を右上に小さく (2026-11-10〜)。PICO で端が切れないよう少し内側に置く
+        if getattr(args, "battery_ok", False):
+            bsize = args.battery_font_size or max(10, int(round(size * 0.65)))
+            ovl += ('textoverlay name=bat text="" auto-resize=false font-desc="%s %d" '
+                    'valignment=top halignment=right xpad=%d ypad=%d shaded-background=true wait-text=false ! '
+                    % (args.overlay_font, bsize, max(4, int(eye_w * args.battery_xpad)),
+                       max(4, int(eye_h * 0.03))))
 
     if sbs:
         # 左右に同じ映像を並べる (CPU の compositor はコピーだけなので軽い)
@@ -445,7 +453,8 @@ class Encoder(object):
         self.overlay = None
         el = self.pipeline.get_by_name("ovl")
         if el is not None:
-            self.overlay = StatusOverlay(el, args, log)
+            self.overlay = StatusOverlay(el, args, log, battery_el=self.pipeline.get_by_name("bat"),
+                                         battery=getattr(args, "battery", None))
 
     def _on_sample(self, sink):
         sample = sink.emit("pull-sample")
@@ -651,7 +660,8 @@ class Stream(object):
                     log("送信 %.1f fps, %.0f kbps, 捨て %d, 待ち %d, CPU %.0f%% (経過 %.0f 秒)%s" % (
                         (self.sent - last_sent) / dt, (self.sent_bytes - last_bytes) * 8 / dt / 1000,
                         self.dropped, self.q.qsize(), cpu, now - t0,
-                        (", 表示 [%s] %s" % (ov.level, ov.text)) if ov else ""))
+                        ((", 表示 [%s] %s" % (ov.level, ov.text)) if ov else "")
+                        + ((", %s" % ov.bat_text) if ov and ov.bat_text else "")))
                     last, last_sent, last_bytes, cpu0 = now, self.sent, self.sent_bytes, cpu1
         except Exception as e:
             log("配信エラー: %s" % e)
@@ -870,6 +880,14 @@ def main():
     p.add_argument("--overlay-hz", type=float, default=10.0, help="状態を読む回数 (1 秒あたり)")
     p.add_argument("--redis-host", default="127.0.0.1")
     p.add_argument("--redis-port", type=int, default=6379)
+    # G1 のバッテリー残量 (DDS rt/lf/bmsstate を読むだけ) を右上に小さく出す
+    p.add_argument("--no-battery", action="store_true", help="バッテリー残量を出さない")
+    p.add_argument("--battery-net", default="eth0", help="DDS を使うネットワーク (ブリッジと同じ eth0)")
+    p.add_argument("--battery-topic", default="rt/lf/bmsstate")
+    p.add_argument("--battery-font-size", type=int, default=0, help="0 なら状態の文字の 0.65 倍")
+    p.add_argument("--battery-xpad", type=float, default=0.10,
+                   help="右端からの距離 (片目の幅に対する割合)。PICO で端が切れるなら大きく")
+    p.add_argument("--battery-fake", type=int, default=None, help="テスト用: DDS を使わずこの値 [%%] を出す")
     args = p.parse_args()
     args.cam_width, args.cam_height = parse_size(args.cam_size)
     args.width, args.height = parse_size(args.size)
@@ -902,6 +920,12 @@ def main():
                 args.overlay_lang = "ja" if fam else "en"
                 log("状態表示: %s" % ("日本語 (フォント %s)" % fam if fam else
                                      "英語 (日本語フォントが見つからないため)"))
+
+    # バッテリー残量: 読めなければ出さないだけで、映像は続ける
+    args.battery, args.battery_ok = None, False
+    if args.overlay_ok and not args.no_battery:
+        args.battery = BatteryReader(args.battery_net, args.battery_topic, log, fake=args.battery_fake)
+        args.battery_ok = args.battery.start()
 
     if args.selftest > 0:
         return selftest(args)

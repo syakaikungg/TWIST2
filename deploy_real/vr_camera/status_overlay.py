@@ -8,6 +8,9 @@
 
 G1 のホストの python3 (3.8) には redis モジュールが無いので、GET だけの小さなクライアントを持つ。
 文字は GStreamer の textoverlay (pango) で描く。左右並びのときは、並べる前の片目の絵に描くので両目の同じ位置に出る。
+
+右上には小さく G1 のバッテリー残量 (battery_dds.py が DDS で読む soc) を出す (2026-11-10〜)。
+20% 以下で橙、10% 以下で赤。値が 15 秒届かなければ「電池 ?」。
 """
 
 import json
@@ -31,6 +34,15 @@ LEVEL_COLORS = {
     "ready": 0xFF50D8FF,  # 水色: 握れば動く
     "ok": 0xFF60FF70,     # 緑: 追従中
 }
+
+# 電池の残量の文字色 (ARGB)
+BAT_COLORS = {
+    "ok": 0xFFE8E8E8,        # 白に近い灰
+    "low": 0xFFFFA020,       # 橙: 20% 以下
+    "very_low": 0xFFFF4040,  # 赤: 10% 以下
+    "unknown": 0xFFA0A0A0,   # 灰: 値が届いていない
+}
+BAT_LOW, BAT_VERY_LOW, BAT_STALE_SEC = 20, 10, 15.0
 
 # IK からの状態が読めないときの表示 (level, ja, en)
 NO_IK = ("stop", "IK停止（状態が届いていません）", "IK STOPPED - no status")
@@ -124,11 +136,29 @@ def describe(raw, now, lang, stale_sec):
     return level, str(text)
 
 
+def describe_battery(soc, t, now, lang, stale_sec=BAT_STALE_SEC):
+    """電池の (色の名前, 表示する文字)"""
+    label = "電池" if lang == "ja" else "BAT"
+    if soc is None or now - t > stale_sec:
+        return "unknown", "%s ?" % label
+    if soc <= BAT_VERY_LOW:
+        lv = "very_low"
+    elif soc <= BAT_LOW:
+        lv = "low"
+    else:
+        lv = "ok"
+    return lv, "%s %d%%" % (label, soc)
+
+
 class StatusOverlay(object):
     """teleop_display を読み続けて textoverlay の文字と色を変える (配信 1 回ごとに作る)"""
 
-    def __init__(self, element, args, log=print):
+    def __init__(self, element, args, log=print, battery_el=None, battery=None):
         self.el = element
+        self.bat_el = battery_el     # 右上の小さい文字 (無ければ電池は出さない)
+        self.battery = battery       # battery_dds.BatteryReader (ok のときだけ使う)
+        self.bat_level = None
+        self.bat_text = None
         self.log = log
         self.key = args.overlay_key
         self.lang = args.overlay_lang
@@ -144,12 +174,16 @@ class StatusOverlay(object):
 
     def start(self):
         # 古い GStreamer に無いかもしれない見た目の設定は、無ければ飛ばす
-        for name, val in (("shading-value", 150), ("draw-shadow", False)):
-            try:
-                self.el.set_property(name, val)
-            except Exception:
-                pass
+        for el in (self.el, self.bat_el):
+            if el is None:
+                continue
+            for name, val in (("shading-value", 150), ("draw-shadow", False)):
+                try:
+                    el.set_property(name, val)
+                except Exception:
+                    pass
         self._apply(*self._read())
+        self._apply_battery()
         self.thread = threading.Thread(target=self._run, name="overlay", daemon=True)
         self.thread.start()
 
@@ -186,7 +220,22 @@ class StatusOverlay(object):
         except Exception as e:
             self.log("状態表示を更新できません: %s" % e)
 
+    def _apply_battery(self):
+        if self.bat_el is None or self.battery is None or not self.battery.ok:
+            return
+        soc, t = self.battery.latest()
+        level, text = describe_battery(soc, t, time.time(), self.lang)
+        if level == self.bat_level and text == self.bat_text:
+            return
+        self.bat_level, self.bat_text = level, text
+        try:
+            self.bat_el.set_property("color", BAT_COLORS.get(level, 0xFFFFFFFF))
+            self.bat_el.set_property("text", GLib.markup_escape_text(text) if GLib else text)
+        except Exception as e:
+            self.log("電池の表示を更新できません: %s" % e)
+
     def _run(self):
         while not self.stop_event.wait(self.period):
             self._apply(*self._read())
+            self._apply_battery()
 

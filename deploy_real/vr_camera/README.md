@@ -15,6 +15,7 @@ G1 の頭の RealSense D435i (RGB) の映像を、PICO の XRobot アプリ (XRo
 | `fake_pico_client.py` | PICO の代わりに要求を送って受信を数えるテスト用クライアント |
 | `sim_head_cam.py` | シミュレーターの G1 の頭カメラ目線を GPU で描き、`--source sim` に渡す |
 | `status_overlay.py` | 腕テレオペの状態 (Redis `teleop_display`) を映像に文字で重ねる。`g1_cam_to_pico.py` が読み込む |
+| `battery_dds.py` | G1 のバッテリー残量 (DDS `rt/lf/bmsstate` の soc) を読むだけ。右上に小さく「電池 51%」と出すのに使う |
 
 ## 仕組み
 
@@ -144,6 +145,7 @@ PICO に 30fps で約 9 分配信して捨て 0、関節角の遅れ 0.01 秒。
   Redis につながらないと「状態を読めません（Redis）」(橙) と出す。
 - 日本語フォントが G1 に無ければ (`fc-list :lang=ja` が空)、自動で英語 (`en`) を出す。`--overlay-lang ja|en` で固定できる。
 - GStreamer の `textoverlay` (pango) が無い、または入れるとパイプラインが作れないときは、文字なしで映像だけ送る (ログに「注意」)。
+- 右上に小さく G1 のバッテリー残量 (「電池 51%」、11/10〜)。送信プログラムが DDS の `rt/lf/bmsstate` を eth0 で読むだけで、テレオペが動いていなくても出る。20% 以下で橙、10% 以下で赤、15秒届かなければ「電池 ?」。unitree_sdk2py が無い・DDS を始められないときは出さない (映像は続く)。`--no-battery`、`--battery-xpad 0.10` (右端からの距離、片目の幅に対する割合)、`--battery-font-size`、テスト用 `--battery-fake 51`。
 - 配信中のログの「送信 …」の行の最後に、いま出している表示 (`表示 [ready] 握れば動きます` など) が付く。
 - 主なオプション: `--no-overlay` (重ねない)、`--overlay-pos top|bottom`、`--overlay-font-size 36` (既定は片目の高さ 720 で 30)、
   `--overlay-key`、`--redis-host` / `--redis-port` (既定 127.0.0.1:6379)。
