@@ -12,9 +12,10 @@
 # The bridge's integral waist correction is OFF by default since 2026-11-10 (WAIST_CORRECT=roll,pitch turns it on as
 # before): with the tool on the right wrist it wound up to its 0.15 rad limit while the waist did not move, the waist
 # pitch torque went 4 -> 24 Nm and the motor 54 -> 66 C in 25 s. For the exhibition the robot hangs with the legs limp.
-# Motor temperature limit of the bridge: MAX_TEMP (default 65 C since 2026-11-04, was 60; e.g. MAX_TEMP=60 bash
-# run_live.sh send). A motor the bridge commands at MAX_TEMP - 5 shows a warning on the PICO; above MAX_TEMP the
-# bridge stops (3 s release). A leg motor (the robot's own) at 70 C or more only shows a warning.
+# Motor temperature limit of the bridge: MAX_TEMP (default 70 C since 2026-11-10, 65 C from 2026-11-04, 60 C before;
+# e.g. MAX_TEMP=65 bash run_live.sh send; 50..70). Raised to 70 C at the operator's request on 2026-11-10: with the
+# tool on the right wrist the right shoulder pitch holds 8-10 Nm and reached 65 C after about 30 s of following.
+# A motor the bridge commands at MAX_TEMP - 5 shows a warning on the PICO; above MAX_TEMP the bridge stops (3 s release). A leg motor (the robot's own) at 70 C or more only shows a warning.
 # Stop the arms at any time: left X/Y on the PICO or ~/nextech/arm_ik/stop.sh (arm_sdk weight -> 0 in 3 s: arms and
 # waist go back to the robot's own controller; the legs are never commanded). The remote's L2+B is whole-body
 # damping (the robot goes limp): last resort only, with the robot hanging on its rope.
@@ -26,10 +27,10 @@ case "$MODE" in
 esac
 VEL=${2:-0.5}
 TOOL=${4:-hand}
-MAX_TEMP=${MAX_TEMP:-65}
+MAX_TEMP=${MAX_TEMP:-70}
 WAIST_CORRECT=${WAIST_CORRECT-}
 case "$WAIST_CORRECT" in ""|roll|pitch|roll,pitch|pitch,roll) ;; *) echo "WAIST_CORRECT must be empty, roll, pitch or roll,pitch"; exit 1 ;; esac
-case "$MAX_TEMP" in 5[0-9]|6[0-5]) ;; *) echo "MAX_TEMP must be 50..65"; exit 1 ;; esac
+case "$MAX_TEMP" in 5[0-9]|6[0-9]|70) ;; *) echo "MAX_TEMP must be 50..70"; exit 1 ;; esac
 case "$TOOL" in hand|drill) ;; *) echo "tool must be hand or drill"; exit 1 ;; esac
 cd ~/nextech/arm_ik || exit 1
 if ps -eo cmd | grep -E 'arm_sdk_bridge|arm_ik_dryrun|arm_sim\.py|sim_run\.sh' | grep -v grep; then
