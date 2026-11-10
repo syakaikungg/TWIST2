@@ -17,10 +17,11 @@ G1 頭カメラ (RealSense D435i RGB) → PICO (XRoboToolkit の XRobot アプ�
 エンコードは Jetson のハードウェアエンコーダー (nvv4l2h264enc) を GStreamer で使うので CPU 負荷は小さい。
 
 映像の元 (--source):
-  v4l2      : /dev/video4 (D435i の RGB, YUYV) を直接開く。Unitree の videohub_pc4 を止めておく必要がある。
+  v4l2      : (既定) /dev/video4 (D435i の RGB, YUYV) を直接開く。Unitree の videohub_pc4 を止めておく必要がある。
   multicast : Unitree の videohub_pc4 が出している H.264 RTP マルチキャスト (既定 230.1.1.1:1720) を
-              受けてデコードし直す。サービスを止めなくてよい。
+              受けてデコードし直す。2026-11-03 の G1 では何も流れておらず使えなかった。
   test      : テスト模様 (videotestsrc)。カメラなしで PICO までの経路を確かめる用。
+  sim       : シミュレーターの G1 の頭カメラ目線。sim_head_cam.py (127.0.0.1:5601) が描いた絵を受け取る。
 
 ホストの python3 (gi / GStreamer 1.16 + NVIDIA プラグイン) で動かす。conda の gmr 環境ではない。
 
@@ -28,11 +29,12 @@ G1 頭カメラ (RealSense D435i RGB) → PICO (XRoboToolkit の XRobot アプ�
   # ネットワークなしの自己テスト (5 秒エンコードして /tmp に保存)
   python3 g1_cam_to_pico.py --source test --selftest 5 --size 2560x720
   # PICO 待ち受け
-  python3 g1_cam_to_pico.py --source multicast
-  python3 g1_cam_to_pico.py --source v4l2 --device /dev/video4
+  python3 g1_cam_to_pico.py --source v4l2 --cam-size 960x540 --listen 192.168.123.164:13579
 """
 
 import argparse
+import fcntl
+import glob
 import os
 import queue
 import signal
@@ -53,6 +55,9 @@ try:
     from gi.repository import GstVideo  # noqa: E402
 except (ValueError, ImportError):
     GstVideo = None
+
+from status_overlay import StatusOverlay, has_japanese_font  # noqa: E402
+from battery_dds import BatteryReader  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -120,11 +125,81 @@ def has_element(name):
     return Gst.ElementFactory.find(name) is not None
 
 
+# --- v4l2 のデバイスを探す (USB がリセットされると /dev/video* の番号が変わるため) ---
+_VIDIOC_QUERYCAP = 0x80685600            # _IOR('V', 0, struct v4l2_capability[104])
+_VIDIOC_ENUM_FMT = 0xC0405602            # _IOWR('V', 2, struct v4l2_fmtdesc[64])
+_VIDIOC_ENUM_FRAMESIZES = 0xC02C564A     # _IOWR('V', 74, struct v4l2_frmsizeenum[44])
+_V4L2_CAP_VIDEO_CAPTURE = 0x00000001
+_V4L2_CAP_DEVICE_CAPS = 0x80000000
+_FOURCC_YUYV = 0x56595559
+
+
+def _v4l2_info(path):
+    """(カード名, YUYV で出せる大きさの集合) を返す。映像を取れないノードは None"""
+    fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+    try:
+        cap = bytearray(104)
+        fcntl.ioctl(fd, _VIDIOC_QUERYCAP, cap)
+        card = bytes(cap[16:48]).split(b"\0")[0].decode("utf-8", "replace")
+        caps, dcaps = struct.unpack_from("<II", cap, 84)
+        if not ((dcaps if caps & _V4L2_CAP_DEVICE_CAPS else caps) & _V4L2_CAP_VIDEO_CAPTURE):
+            return None
+        fourccs = []
+        for i in range(64):
+            fd_buf = bytearray(64)
+            struct.pack_into("<II", fd_buf, 0, i, 1)   # index, type=VIDEO_CAPTURE
+            try:
+                fcntl.ioctl(fd, _VIDIOC_ENUM_FMT, fd_buf)
+            except OSError:
+                break
+            fourccs.append(struct.unpack_from("<I", fd_buf, 44)[0])
+        if _FOURCC_YUYV not in fourccs:
+            return card, set()
+        sizes = set()
+        for i in range(64):
+            fs = bytearray(44)
+            struct.pack_into("<II", fs, 0, i, _FOURCC_YUYV)
+            try:
+                fcntl.ioctl(fd, _VIDIOC_ENUM_FRAMESIZES, fs)
+            except OSError:
+                break
+            if struct.unpack_from("<I", fs, 8)[0] == 1:   # DISCRETE
+                sizes.add(struct.unpack_from("<II", fs, 12))
+        return card, sizes
+    finally:
+        os.close(fd)
+
+
+def find_v4l2_device(want, width, height, card_hint="RealSense"):
+    """--device auto のとき、カード名に card_hint を含み YUYV で width x height を出せるノードを探す"""
+    if want != "auto":
+        return want
+    found = []
+    for path in sorted(glob.glob("/dev/video*"), key=lambda p: int("0" + "".join(c for c in p if c.isdigit()))):
+        try:
+            info = _v4l2_info(path)
+        except OSError:
+            continue
+        if info and info[1]:
+            found.append((path, info[0], info[1]))
+    for path, card, sizes in found:
+        if card_hint.lower() in card.lower() and (width, height) in sizes:
+            return path
+    for path, card, sizes in found:
+        if card_hint.lower() in card.lower():
+            log("注意: %s (%s) は %dx%d を出せないようです (出せる大きさ: %s)" % (
+                path, card, width, height, sorted(sizes)))
+            return path
+    raise RuntimeError("YUYV を出せる %s のカメラが見つかりません (見つかったもの: %s)" % (
+        card_hint, [(p, c) for p, c, _ in found] or "なし"))
+
+
 def crop_box(src_w, src_h, dst_w, dst_h):
     """src を dst の縦横比に合わせて中央で切り取る範囲 (left, top, right, bottom)"""
     src_ar = src_w / float(src_h)
     dst_ar = dst_w / float(dst_h)
-    if abs(src_ar - dst_ar) < 1e-3:
+    # 848x480 (1.767) と 16:9 (1.778) のような 2% 未満の差は、切らずにわずかに引き伸ばす
+    if abs(src_ar - dst_ar) / dst_ar < 0.02:
         return None
     if src_ar > dst_ar:  # 横が余る
         w = int(round(src_h * dst_ar)) // 2 * 2
@@ -144,9 +219,12 @@ def build_pipeline_desc(args, out_w, out_h, bitrate, hevc):
 
     # --- 映像の元 ---
     if args.source == "v4l2":
+        dev = find_v4l2_device(args.device, args.cam_width, args.cam_height, args.device_hint)
+        if dev != args.device:
+            log("カメラ: %s (自動で選択)" % dev)
         src = ("v4l2src device=%s do-timestamp=true ! "
                "video/x-raw,format=YUY2,width=%d,height=%d,framerate=%d/1 ! "
-               % (args.device, args.cam_width, args.cam_height, args.cam_fps))
+               % (dev, args.cam_width, args.cam_height, args.cam_fps))
     elif args.source == "multicast":
         iface = ("multicast-iface=%s " % args.mcast_iface) if args.mcast_iface else ""
         dec = "nvv4l2decoder" if args.encoder == "nv" else "avdec_h264"
@@ -154,6 +232,13 @@ def build_pipeline_desc(args, out_w, out_h, bitrate, hevc):
                "caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H264\" ! "
                "rtpjitterbuffer latency=%d drop-on-latency=true ! rtph264depay ! h264parse ! %s ! "
                % (args.mcast_group, args.mcast_port, iface, args.jitter_ms, dec))
+    elif args.source == "sim":
+        # sim_head_cam.py から受け取る RGBA の生フレーム (SimFeeder が appsrc に押し込む)
+        src = ("appsrc name=rawsrc is-live=true format=time do-timestamp=true block=false "
+               "caps=video/x-raw,format=RGBA,width=%d,height=%d,framerate=%d/1 ! "
+               % (args.cam_width, args.cam_height, args.cam_fps))
+        if args.encoder != "nv":
+            src += "videoconvert ! "
     else:  # test
         src = ("videotestsrc is-live=true pattern=%s ! "
                "video/x-raw,format=I420,width=%d,height=%d,framerate=%d/1 ! "
@@ -165,9 +250,12 @@ def build_pipeline_desc(args, out_w, out_h, bitrate, hevc):
     if args.aspect == "crop" and args.source != "multicast":
         crop = crop_box(args.cam_width, args.cam_height, eye_w, eye_h)
     if args.encoder == "nv":
-        conv = "nvvidconv"
+        conv = "nvvidconv name=scaler"   # 拡大縮小の方法 (interpolation-method) は作ったあとに設定する
         if crop:
-            conv += " left=%d top=%d right=%d bottom=%d" % crop
+            # 普通のメモリの絵を nvvidconv で直接切り取ると CPU が重くなった (11/4 の G1: 640x480 と 848x480 で
+            # 1 コアの 55〜68%、切らない 960x540 は 25%)。先に GPU 側 (NVMM) に移してから切り取る。
+            conv = ("nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! "
+                    "nvvidconv name=scaler left=%d top=%d right=%d bottom=%d" % crop)
     else:
         conv = "videoconvert ! videoscale"
         if crop:
@@ -180,9 +268,24 @@ def build_pipeline_desc(args, out_w, out_h, bitrate, hevc):
     else:
         enc_in_caps = "video/x-raw,format=I420"
 
+    # 腕テレオペの状態の文字 (片目の絵に描くので、左右並びでは両目の同じ位置に出る)
+    ovl = ""
+    if args.overlay_ok:
+        size = args.overlay_font_size or max(12, int(round(eye_h * 0.042)))
+        ovl = ('textoverlay name=ovl text="" auto-resize=false font-desc="%s %d" '
+               'valignment=%s halignment=center ypad=%d shaded-background=true wait-text=false ! '
+               % (args.overlay_font, size, args.overlay_pos, max(4, int(eye_h * 0.03))))
+        # G1 のバッテリー残量を右上に小さく (2026-11-10〜)。PICO で端が切れないよう少し内側に置く
+        if getattr(args, "battery_ok", False):
+            bsize = args.battery_font_size or max(10, int(round(size * 0.65)))
+            ovl += ('textoverlay name=bat text="" auto-resize=false font-desc="%s %d" '
+                    'valignment=top halignment=right xpad=%d ypad=%d shaded-background=true wait-text=false ! '
+                    % (args.overlay_font, bsize, max(4, int(eye_w * args.battery_xpad)),
+                       max(4, int(eye_h * 0.03))))
+
     if sbs:
         # 左右に同じ映像を並べる (CPU の compositor はコピーだけなので軽い)
-        scale = "%s ! video/x-raw,format=I420,width=%d,height=%d ! " % (conv, eye_w, eye_h)
+        scale = "%s ! video/x-raw,format=I420,width=%d,height=%d ! %s" % (conv, eye_w, eye_h, ovl)
         # Jetson ではエンコーダーの前に NVMM へ戻す (caps を 2 つ続けると parse_launch が失敗するので分ける)
         tail = ("nvvidconv ! %s,width=%d,height=%d ! " % (enc_in_caps, eye_w * 2, eye_h)
                 if args.encoder == "nv" else "")
@@ -194,6 +297,11 @@ def build_pipeline_desc(args, out_w, out_h, bitrate, hevc):
                 "%s name=comp background=black sink_0::xpos=0 sink_1::xpos=%d ! "
                 "video/x-raw,format=I420,width=%d,height=%d ! %s"
                 % (mixer, eye_w, eye_w * 2, eye_h, tail))
+    elif ovl:
+        # 文字を描くために一度 CPU の I420 にして、エンコーダーの前で戻す
+        back = ("nvvidconv ! %s,width=%d,height=%d ! " % (enc_in_caps, eye_w, eye_h)
+                if args.encoder == "nv" else "")
+        body = "%s ! video/x-raw,format=I420,width=%d,height=%d ! %s%s" % (conv, eye_w, eye_h, ovl, back)
     else:
         body = "%s ! %s,width=%d,height=%d ! " % (conv, enc_in_caps, eye_w, eye_h)
 
@@ -225,18 +333,103 @@ def build_pipeline_desc(args, out_w, out_h, bitrate, hevc):
     return src + body + enc + sink, sbs, eye_w, eye_h
 
 
+class SimFeeder(object):
+    """sim_head_cam.py (127.0.0.1:5601) から RGBA フレームを受け取り appsrc に渡す"""
+    MAGIC = b"G1RAW1"
+
+    def __init__(self, addr):
+        host, port = addr.rsplit(":", 1)
+        try:
+            self.sock = socket.create_connection((host, int(port)), timeout=3)
+        except OSError as e:
+            raise RuntimeError("シムの頭カメラ描画 (sim_head_cam.py, %s) につながりません: %s" % (addr, e))
+        self.sock.settimeout(3)
+        hdr = self._recv_exact(len(self.MAGIC) + 16)
+        if hdr[:len(self.MAGIC)] != self.MAGIC:
+            raise RuntimeError("sim_head_cam.py からの返事が想定と違います: %r" % hdr[:8])
+        self.width, self.height, self.fps, fmt = struct.unpack("<IIII", hdr[len(self.MAGIC):])
+        self.frame_size = self.width * self.height * 4
+        self.stop_event = threading.Event()
+        self.thread = None
+        self.appsrc = None
+        self.pushed = 0
+        self.skipped = 0
+        log("シム描画につながりました %dx%d %dfps" % (self.width, self.height, self.fps))
+
+    def _recv_exact(self, n, buf=None):
+        if buf is None:
+            buf = bytearray(n)
+        view = memoryview(buf)
+        got = 0
+        while got < n:
+            k = self.sock.recv_into(view[got:], n - got)
+            if k == 0:
+                raise ConnectionError("sim_head_cam.py との接続が切れました")
+            got += k
+        return buf
+
+    def start(self, appsrc):
+        self.appsrc = appsrc
+        self.thread = threading.Thread(target=self._run, name="simfeed", daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        buf = bytearray(self.frame_size)
+        try:
+            while not self.stop_event.is_set():
+                self._recv_exact(self.frame_size, buf)
+                # 下流が詰まっているときは古い絵を溜めずに捨てる (遅れを増やさない)
+                if self.appsrc.get_property("current-level-bytes") > 2 * self.frame_size:
+                    self.skipped += 1
+                    continue
+                self.appsrc.emit("push-buffer", Gst.Buffer.new_wrapped(bytes(buf)))
+                self.pushed += 1
+        except Exception as e:
+            if not self.stop_event.is_set():
+                log("シム描画からの受信が止まりました: %s" % e)
+        finally:
+            try:
+                self.appsrc.emit("end-of-stream")
+            except Exception:
+                pass
+
+    def stop(self):
+        self.stop_event.set()
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        self.sock.close()
+        if self.thread:
+            self.thread.join(timeout=3)
+
+
 class Encoder(object):
     """パイプラインを動かし、エンコード済みフレームを on_frame(bytes, is_key) に渡す"""
 
     def __init__(self, args, out_w, out_h, bitrate, hevc, on_frame):
         self.args = args
         self.on_frame = on_frame
+        self.feeder = None
+        if args.source == "sim":
+            self.feeder = SimFeeder(args.sim_addr)
+            args.cam_width, args.cam_height, args.cam_fps = (
+                self.feeder.width, self.feeder.height, self.feeder.fps)
         desc, sbs, eye_w, eye_h = build_pipeline_desc(args, out_w, out_h, bitrate, hevc)
+        try:
+            self.pipeline = Gst.parse_launch(desc)
+        except Exception as e:
+            if not args.overlay_ok:
+                raise
+            # 状態の文字のせいで映像が止まらないよう、重ねずに作り直す
+            log("注意: 状態の重ね表示を入れるとパイプラインを作れません (%s)。重ねずに続けます" % e)
+            args.overlay_ok = False
+            desc, sbs, eye_w, eye_h = build_pipeline_desc(args, out_w, out_h, bitrate, hevc)
+            self.pipeline = Gst.parse_launch(desc)
         log("pipeline: %s" % desc)
         log("出力 %dx%d (%s, 片目 %dx%d), %d kbps, %s" % (
             eye_w * (2 if sbs else 1), eye_h, "左右ステレオ" if sbs else "モノラル",
             eye_w, eye_h, bitrate // 1000, "H.265" if hevc else "H.264"))
-        self.pipeline = Gst.parse_launch(desc)
         self.sink = self.pipeline.get_by_name("sink")
         self.sink.connect("new-sample", self._on_sample)
         self.enc_elem = None
@@ -250,6 +443,18 @@ class Encoder(object):
         self.frames = 0
         self.bytes = 0
         self.src_caps_logged = False
+        # nvvidconv の拡大縮小は既定が Nearest (ブロック状に粗くなる) なので変える。無い版なら既定のまま
+        scaler = self.pipeline.get_by_name("scaler")
+        if scaler is not None and args.interp >= 0:
+            try:
+                scaler.set_property("interpolation-method", args.interp)
+            except Exception as e:
+                log("注意: nvvidconv の interpolation-method を %d にできません (%s)。既定のまま" % (args.interp, e))
+        self.overlay = None
+        el = self.pipeline.get_by_name("ovl")
+        if el is not None:
+            self.overlay = StatusOverlay(el, args, log, battery_el=self.pipeline.get_by_name("bat"),
+                                         battery=getattr(args, "battery", None))
 
     def _on_sample(self, sink):
         sample = sink.emit("pull-sample")
@@ -285,6 +490,10 @@ class Encoder(object):
         r = self.pipeline.set_state(Gst.State.PLAYING)
         if r == Gst.StateChangeReturn.FAILURE:
             raise RuntimeError("パイプラインを開始できません (カメラが使用中か、要素が足りない可能性)")
+        if self.feeder:
+            self.feeder.start(self.pipeline.get_by_name("rawsrc"))
+        if self.overlay:
+            self.overlay.start()
 
     def poll_bus(self, timeout_ms=100):
         """エラー/EOS なら文字列を返す"""
@@ -310,6 +519,10 @@ class Encoder(object):
         return "eos"
 
     def stop(self):
+        if self.overlay:
+            self.overlay.stop()
+        if self.feeder:
+            self.feeder.stop()
         try:
             self.pipeline.set_state(Gst.State.NULL)
             self.pipeline.get_state(3 * Gst.SECOND)
@@ -414,6 +627,7 @@ class Stream(object):
             last_sent = 0
             last_bytes = 0
             cpu0 = os.times()
+            warned_nosrc = False
             while not self.stop_event.is_set():
                 err = self.enc.poll_bus(0)
                 if err:
@@ -435,13 +649,19 @@ class Stream(object):
                     self.sent += 1
                     self.sent_bytes += len(data)
                 now = time.time()
+                if not warned_nosrc and not self.enc.src_caps_logged and now - t0 > 3:
+                    log("注意: 映像の元から 3 秒たっても 1 枚も届いていません (黒い画面になります)")
+                    warned_nosrc = True
                 if now - last >= self.args.stats_sec:
                     cpu1 = os.times()
                     dt = now - last
                     cpu = 100.0 * ((cpu1.user - cpu0.user) + (cpu1.system - cpu0.system)) / dt
-                    log("送信 %.1f fps, %.0f kbps, 捨て %d, 待ち %d, CPU %.0f%% (経過 %.0f 秒)" % (
+                    ov = self.enc.overlay
+                    log("送信 %.1f fps, %.0f kbps, 捨て %d, 待ち %d, CPU %.0f%% (経過 %.0f 秒)%s" % (
                         (self.sent - last_sent) / dt, (self.sent_bytes - last_bytes) * 8 / dt / 1000,
-                        self.dropped, self.q.qsize(), cpu, now - t0))
+                        self.dropped, self.q.qsize(), cpu, now - t0,
+                        ((", 表示 [%s] %s" % (ov.level, ov.text)) if ov else "")
+                        + ((", %s" % ov.bat_text) if ov and ov.bat_text else "")))
                     last, last_sent, last_bytes, cpu0 = now, self.sent, self.sent_bytes, cpu1
         except Exception as e:
             log("配信エラー: %s" % e)
@@ -589,7 +809,14 @@ def selftest(args):
             i += 3
         else:
             i += 1
-    log("自己テスト結果: %s" % (err or "OK"))
+    if err:
+        result = "NG (%s)" % err
+    elif stats["n"] == 0 or not enc.src_caps_logged:
+        # 左右並びの合成 (compositor) は入力が無くても黒い画面を出すことがあるので、映像の元を直接見る
+        result = "NG (映像の元から 1 枚も届いていません)"
+    else:
+        result = "OK"
+    log("自己テスト結果: %s" % result)
     log("  %.1f 秒, %d フレーム (%.1f fps), キーフレーム %d, %.0f kbps, CPU %.0f%%" % (
         dt, stats["n"], stats["n"] / dt, stats["key"], stats["bytes"] * 8 / dt / 1000, cpu))
     log("  先頭フレームの NAL 種類 %s (7=SPS 8=PPS 5=IDR が並べば PICO で再生できる形)" % nal_types)
@@ -606,9 +833,14 @@ def parse_size(s):
 def main():
     p = argparse.ArgumentParser(description="G1 カメラ → PICO XRobot アプリ 映像送信")
     p.add_argument("--listen", default="0.0.0.0:13579", help="待ち受け (既定 0.0.0.0:13579)")
-    p.add_argument("--source", choices=["v4l2", "multicast", "test"], default="multicast")
-    p.add_argument("--device", default="/dev/video4", help="v4l2 のデバイス (D435i RGB = /dev/video4)")
-    p.add_argument("--cam-size", default="1280x720", help="カメラ側の解像度 (v4l2/test)")
+    p.add_argument("--source", choices=["v4l2", "multicast", "test", "sim"], default="v4l2")
+    p.add_argument("--sim-addr", default="127.0.0.1:5601", help="sim_head_cam.py の待ち受け (--source sim)")
+    p.add_argument("--device", default="auto",
+                   help="v4l2 のデバイス。auto = 配信のたびに RealSense の RGB (YUYV) のノードを探す "
+                        "(USB リセットで /dev/video4 の番号が変わることがあるため)")
+    p.add_argument("--device-hint", default="RealSense", help="--device auto で探すカメラの名前の一部")
+    p.add_argument("--cam-size", default="960x540",
+                   help="カメラ側の解像度 (v4l2/test)。11/4 の G1 は 1280x720 が不安定だったので 960x540 (16:9 で全体が入る)")
     p.add_argument("--cam-fps", type=int, default=30)
     p.add_argument("--mcast-group", default="230.1.1.1")
     p.add_argument("--mcast-port", type=int, default=1720)
@@ -624,6 +856,8 @@ def main():
     p.add_argument("--sbs-min-width", type=int, default=2000, help="この幅以上なら左右並びにする")
     p.add_argument("--aspect", choices=["crop", "stretch"], default="crop",
                    help="片目の縦横比に合わせて中央を切り取る(crop) か引き伸ばす(stretch)")
+    p.add_argument("--interp", type=int, default=1,
+                   help="nvvidconv の拡大縮小の方法 0=Nearest 1=Bilinear 2=5-Tap 3=10-Tap 4=Smart 5=Nicest (-1 で既定のまま)")
     p.add_argument("--bitrate", type=int, default=0, help="bps。0 なら PICO の要求値")
     p.add_argument("--no-hevc", action="store_true", help="PICO が H.265 を要求しても H.264 で送る")
     p.add_argument("--gop", type=int, default=30, help="キーフレーム間隔 (フレーム数)")
@@ -634,6 +868,26 @@ def main():
     p.add_argument("--stats-sec", type=float, default=5.0)
     p.add_argument("--selftest", type=float, default=0, help="秒数。ネットワークなしでエンコードだけ試す")
     p.add_argument("--selftest-out", default="/tmp/g1_cam_selftest.h264")
+    # 腕テレオペの状態の重ね表示 (Redis teleop_display を読むだけ)
+    p.add_argument("--no-overlay", action="store_true", help="腕テレオペの状態を映像に重ねない")
+    p.add_argument("--overlay-key", default="teleop_display", help="状態の Redis キー (IK が書く JSON)")
+    p.add_argument("--overlay-lang", choices=["auto", "ja", "en"], default="auto",
+                   help="auto = 日本語フォントがあれば ja、無ければ en")
+    p.add_argument("--overlay-pos", choices=["top", "bottom"], default="top", help="文字の位置")
+    p.add_argument("--overlay-font", default="Sans Bold", help="pango のフォント名")
+    p.add_argument("--overlay-font-size", type=int, default=0, help="0 なら片目の高さに合わせる (720 で 30)")
+    p.add_argument("--overlay-stale", type=float, default=0.5, help="状態がこの秒数より古ければ IK停止 と出す")
+    p.add_argument("--overlay-hz", type=float, default=10.0, help="状態を読む回数 (1 秒あたり)")
+    p.add_argument("--redis-host", default="127.0.0.1")
+    p.add_argument("--redis-port", type=int, default=6379)
+    # G1 のバッテリー残量 (DDS rt/lf/bmsstate を読むだけ) を右上に小さく出す
+    p.add_argument("--no-battery", action="store_true", help="バッテリー残量を出さない")
+    p.add_argument("--battery-net", default="eth0", help="DDS を使うネットワーク (ブリッジと同じ eth0)")
+    p.add_argument("--battery-topic", default="rt/lf/bmsstate")
+    p.add_argument("--battery-font-size", type=int, default=0, help="0 なら状態の文字の 0.65 倍")
+    p.add_argument("--battery-xpad", type=float, default=0.10,
+                   help="右端からの距離 (片目の幅に対する割合)。PICO で端が切れるなら大きく")
+    p.add_argument("--battery-fake", type=int, default=None, help="テスト用: DDS を使わずこの値 [%%] を出す")
     args = p.parse_args()
     args.cam_width, args.cam_height = parse_size(args.cam_size)
     args.width, args.height = parse_size(args.size)
@@ -647,10 +901,31 @@ def main():
         need += ["udpsrc", "rtph264depay", "nvv4l2decoder" if args.encoder == "nv" else "avdec_h264"]
     elif args.source == "v4l2":
         need += ["v4l2src"]
+    elif args.source == "sim":
+        need += ["appsrc"]
     missing = [n for n in need if not has_element(n)]
     if missing:
         log("GStreamer の要素が足りません: %s" % missing)
         return 2
+
+    # 状態の重ね表示は無くても映像は送れるので、足りなければ表示なしで続ける
+    args.overlay_ok = False
+    if not args.no_overlay:
+        if not has_element("textoverlay"):
+            log("注意: textoverlay (GStreamer の pango) が無いので、腕テレオペの状態は重ねません")
+        else:
+            args.overlay_ok = True
+            if args.overlay_lang == "auto":
+                fam = has_japanese_font()
+                args.overlay_lang = "ja" if fam else "en"
+                log("状態表示: %s" % ("日本語 (フォント %s)" % fam if fam else
+                                     "英語 (日本語フォントが見つからないため)"))
+
+    # バッテリー残量: 読めなければ出さないだけで、映像は続ける
+    args.battery, args.battery_ok = None, False
+    if args.overlay_ok and not args.no_battery:
+        args.battery = BatteryReader(args.battery_net, args.battery_topic, log, fake=args.battery_fake)
+        args.battery_ok = args.battery.start()
 
     if args.selftest > 0:
         return selftest(args)
