@@ -17,17 +17,19 @@ Operator controls (one person, headset on):
                  glide back to the start pose measured at enable, then pause. Not B: in the PICO app's
                  Remote Vision B switches the camera view between one eye and both eyes.
   left X or Y    EMERGENCY STOP (latched until this program is restarted from the PC)
-Also an emergency stop: PICO data missing for 0.3 s while following (a grip held), or for more than
---stale-hold s (default 2) while enabled but not following, `teleop_stop` set in Redis (stop.sh),
-Ctrl+C / SIGTERM. A shorter gap while not following (Wi-Fi hiccup) only holds: the arms stay where they
-are, and teleop carries on by itself when the data is back (hold the grip again to move).
+Also an emergency stop: PICO data missing for more than --follow-stale s (default 0.5) while following
+(a grip held), or for more than --stale-hold s (default 2) while enabled but not following, `teleop_stop`
+set in Redis (stop.sh), Ctrl+C / SIGTERM. A shorter gap (Wi-Fi hiccup) only holds: the arms stay where
+they are, and teleop carries on by itself when the data is back. After a gap while following, an arm
+whose grip is still held follows again at once, with the same forward direction as before the gap.
+During a gap nothing from the PICO arrives, the left X / Y stop included.
 The state for the operator's display (PICO video overlay) is written to Redis `teleop_display`.
 Collision avoidance keeps each arm (and what it holds) away from the body and the two forearms apart. With
 --tool drill (default) the right arm carries the drill of sim_drill.py (capsules from the wrist flange, about
 24 cm long); --tool hand checks both hands instead (a box around each, as the real hands are still on).
 
   python arm_ik_dryrun.py --arms both
-  python arm_ik_dryrun.py --selftest [--scenario deadman|estop_x|pico_stale|per_arm|drill_cross|none] [--selftest-redis]
+  python arm_ik_dryrun.py --selftest [--scenario deadman|estop_x|pico_stale|follow_gap|per_arm|drill_cross|none] [--selftest-redis]
 """
 import argparse
 import csv
@@ -214,7 +216,11 @@ class SyntheticSource:
     scenario "deadman": A at 1 s; forward ramp 1.5-6 s; grip held 1.5-3.5 s and 5-7 s; trigger 3.8-4.6 s
       (grip released -> drill must stay OFF) and 5.5-6.3 s (grip held -> drill ON).
     scenario "estop_x": A at 1 s, grip from 1.5 s, trigger 3-6 s, left X at 4 s.
-    scenario "pico_stale": A at 1 s, grip from 1.5 s, PICO stream freezes at 4 s.
+    scenario "pico_stale": A at 1 s, grip from 1.5 s, PICO stream freezes at 4 s (stop after --follow-stale).
+    scenario "follow_gap": A at 1 s; both grips from 4.5 s with a forward drift; the head turns 40 deg to the
+      right from 5.5 s (the forward direction must not follow it); PICO frozen 6.0-6.4 s while following
+      (holds, then follows again with the forward direction kept, no stop); frozen again from 8 s for good
+      (stop after --follow-stale).
     scenario "hold": A at 1 s, no grip until 4 s (arms must not move), grip 4-6 s with a forward drift,
       B at 7 s (glide back to the start pose, then pause).
     scenario "sim_suite": A at 1 s, grip 4.5-19.5 s (after the bridge's 3 s weight ramp); right-hand bumps
@@ -365,6 +371,18 @@ class SyntheticSource:
                 d["B"] = (3.0 <= t < 3.1) or (5.0 <= t < 5.1)
                 ret = 7.0 <= t < 7.1
                 d["A"] = (1.0 <= t < 1.1) or (10.0 <= t < 10.1)
+            elif sc == "follow_gap":
+                te = t
+                for f0, f1 in ((6.0, 6.4), (8.0, 1e9)):
+                    if f0 <= t < f1:
+                        te, stamp = f0, int(f0 * 1e9)   # the whole PICO message is frozen, poses included
+                off = np.array([0.0, 0.0, -0.05 * max(0.0, min(te, 9.0) - 4.5)])
+                loff = off.copy()
+                g = float(np.clip((te - 5.5) / 0.4, 0, 1))
+                Rh = R.from_rotvec([0.0, -math.radians(40) * g, 0.0]).as_matrix()
+                neck = np.array([0.0, 1.49, 0.09])
+                head = (neck + Rh @ np.array([0.0, 0.11, -0.09]), Rh)
+                d["grip"] = 1.0 if te >= 4.5 else 0.0
             elif sc == "stale_hold":
                 off = np.array([0.0, 0.0, -0.05 * max(0.0, min(t, 7.0) - 5.0)])
                 d["grip"] = 1.0 if 5.0 <= t < 7.0 else 0.0
@@ -447,12 +465,18 @@ def main():
                     help="after a temperature pause, A is refused until the hottest motor is at or below this [C]")
     ap.add_argument("--stale-hold", type=float, default=2.0,
                     help="PICO data gap tolerated while enabled but not following: the arms hold and teleop "
-                         "resumes when the data is back; longer -> emergency stop [s]. While following: 0.3 s.")
+                         "resumes when the data is back; longer -> emergency stop [s]. While following: "
+                         "--follow-stale.")
+    ap.add_argument("--follow-stale", type=float, default=0.5,
+                    help="PICO data gap tolerated while following (a grip held): the arms hold where they are "
+                         "and follow again when the data is back (same forward direction); longer -> emergency "
+                         "stop [s]. A gap counts from %.1f s without new data. 0.3 = stop at once, as before "
+                         "2026-11-10 (at the venue the Wi-Fi gave single gaps of 0.30-0.32 s)" % STALE_S)
     ap.add_argument("--redis-host", default="127.0.0.1")
     ap.add_argument("--no-redis", action="store_true")
     ap.add_argument("--selftest", action="store_true", help="synthetic inputs, no PICO, no Redis")
     ap.add_argument("--scenario", default="none",
-                    choices=["none", "deadman", "estop_x", "pico_stale", "hold", "sim_suite", "reach_fwd",
+                    choices=["none", "deadman", "estop_x", "pico_stale", "follow_gap", "hold", "sim_suite", "reach_fwd",
                              "buttons", "stale_hold", "per_arm", "drill_cross", "estop_reach", "pause_reach",
                              "temp_pause", "turn"])
     ap.add_argument("--selftest-redis", action="store_true", help="with --selftest or --replay: still use Redis")
@@ -472,7 +496,8 @@ def main():
         args.duration = args.duration or {"none": 16.0, "hold": 12.0, "sim_suite": 24.0, "reach_fwd": 17.0,
                                           "buttons": 12.0, "stale_hold": 12.0, "per_arm": 16.0,
                                           "drill_cross": 14.0, "estop_reach": 15.0,
-                                          "pause_reach": 15.0, "temp_pause": 28.0, "turn": 16.0}.get(args.scenario, 9.0)
+                                          "pause_reach": 15.0, "temp_pause": 28.0, "turn": 16.0,
+                                          "follow_gap": 10.0}.get(args.scenario, 9.0)
 
     def on_sigterm(signum, frame):
         raise StopRequested("SIGTERM")
@@ -654,12 +679,14 @@ def main():
 
     active = follow = drill = returning = False
     stale_holding = False          # data gap while enabled but not following: hold, resume when it is back
+    stale_follow = False           # data gap while following: hold, follow again when it is back (--follow-stale)
     cooling = False                # paused by --temp-pause: A waits for --temp-resume
     missing_since = None           # when the PICO data went bad (frozen stamp or missing pose)
     estop, estop_reason = False, ""
     prev = {"A": False, "B": False, "ret": False, "grip": False}
     grip_on = {"left": False, "right": False}
     follow_s = {s: False for s in sides}   # per arm: following its controller (follow = any of them)
+    gap_resume = {s: False for s in sides}  # per arm: was following when the current data gap began
     grip_wait_noted = False
     clutch = {}
     heading = None                 # operator forward (head yaw at the first grip), shared by both arms
@@ -688,7 +715,7 @@ def main():
             return "ESTOP"
         if not active:
             return "PAUSED"
-        if stale_holding:
+        if stale_holding or stale_follow:
             return "STALE_HOLD"
         if returning:
             return "RETURNING"
@@ -789,11 +816,12 @@ def main():
         rds.set("teleop_display", json.dumps(display(state, drill_out, now), ensure_ascii=False))
 
     def trip(t, reason):
-        nonlocal estop, estop_reason, active, follow, returning, stale_holding
+        nonlocal estop, estop_reason, active, follow, returning, stale_holding, stale_follow
         if not estop:
             estop, estop_reason = True, reason
-            active = follow = returning = stale_holding = False
+            active = follow = returning = stale_holding = stale_follow = False
             follow_s.update({s: False for s in follow_s})
+            gap_resume.update({s: False for s in gap_resume})
             print(f"[{t:6.1f}s] EMERGENCY STOP: {reason}")
 
     try:
@@ -822,8 +850,14 @@ def main():
             if d["X"] or d["Y"]:
                 trip(t, "left X/Y pressed")
             if stale and active:
-                if follow:   # the arms were following the hands: stop at once
-                    trip(t, f"PICO data missing > {STALE_S} s while following")
+                if follow or stale_follow:   # the arms were following the hands: hold, stop if it lasts
+                    if not stale_follow:
+                        stale_follow = True
+                        gap_resume.update(follow_s)
+                        print(f"[{t:6.1f}s] PICO data gap while following -> arms hold, follow again when the "
+                              f"data is back, stop if longer than {args.follow_stale} s")
+                    if stale_s > args.follow_stale:
+                        trip(t, f"PICO data missing > {args.follow_stale} s while following")
                 elif stale_s > args.stale_hold:
                     trip(t, f"PICO data missing > {args.stale_hold} s")
                 elif not stale_holding:
@@ -833,6 +867,11 @@ def main():
                 stale_holding = False
                 if active and not estop:
                     print(f"[{t:6.1f}s] PICO data back after {gap_s:.2f} s -> ENABLED (hold the grip to move)")
+            if stale_follow and (not stale or not active):
+                stale_follow = False
+                if active and not estop:
+                    print(f"[{t:6.1f}s] PICO data back after {gap_s:.2f} s while following -> arms whose grip "
+                          f"is still held follow again")
             if rds is not None and rds.exists("teleop_stop"):
                 trip(t, "stop command (teleop_stop)")
 
@@ -922,21 +961,26 @@ def main():
             for s in sides:
                 if want[s] and not follow_s[s]:
                     hy = head_yaw(d["head"][1])
-                    others = any(follow_s[o] for o in sides if o != s)
-                    if args.heading == "per_arm" or heading is None or not others:
-                        heading, how = hy, "new"
+                    others = any(follow_s[o] or gap_resume[o] for o in sides if o != s)
+                    if gap_resume[s] and s in clutch:   # back after a data gap: the forward direction as before
+                        yaw0, how = clutch[s]["yaw0"], "kept after the data gap"
                     else:
-                        how = "kept from the other arm"
-                    yaw0 = heading
+                        if args.heading == "per_arm" or heading is None or not others:
+                            heading, how = hy, "new"
+                        else:
+                            how = "kept from the other arm"
+                        yaw0 = heading
                     clutch[s] = {"Rz": rot_z(-yaw0), "yaw0": yaw0, "c": d[s], "h": hand_pose(s),
                                  "tgt": hand_pose(s)}   # rate-limited target (absolute mode) starts at the hand
                     print(f"[{t:6.1f}s] grip -> {s} arm FOLLOW (head yaw {math.degrees(hy):.0f} deg, "
                           f"forward {math.degrees(yaw0):.0f} deg {how})")
                 elif follow_s[s] and not want[s]:
-                    if active:
+                    if active and not stale:
                         print(f"[{t:6.1f}s] grip released -> {s} arm holds")
                     set_target(s, *hand_pose(s))   # freeze the target where the arm is now
                 follow_s[s] = want[s]
+                if not stale:
+                    gap_resume[s] = False   # one chance, right when the data is back
             follow = any(follow_s.values())
 
             # Hand targets, in the operator's facing direction at the grip (head yaw).
