@@ -12,17 +12,22 @@
 # The bridge's integral waist correction is OFF by default since 2026-11-10 (WAIST_CORRECT=roll,pitch turns it on as
 # before): with the tool on the right wrist it wound up to its 0.15 rad limit while the waist did not move, the waist
 # pitch torque went 4 -> 24 Nm and the motor 54 -> 66 C in 25 s. For the exhibition the robot hangs with the legs limp.
-# Motor temperature limit of the bridge: MAX_TEMP (default 70 C since 2026-11-10, 65 C from 2026-11-04, 60 C before;
-# e.g. MAX_TEMP=65 bash run_live.sh send; 50..70). Raised to 70 C at the operator's request on 2026-11-10: with the
-# tool on the right wrist the right shoulder pitch holds 8-10 Nm and reached 65 C after about 30 s of following.
+# Motor temperature limit of the bridge: MAX_TEMP (default 75 C since 2026-11-10 late, 70 C earlier that day, 65 C
+# from 2026-11-04, 60 C before; e.g. MAX_TEMP=80 bash run_live.sh send; 50..80). Raised to 70 C at the operator's
+# request on 2026-11-10: with the tool on the right wrist the right shoulder pitch holds 8-10 Nm and reached 65 C after
+# about 30 s of following. Then to 75 C (80 C allowed) at the operator's choice: the bridge checks the hotter of the
+# two values, which Unitree's own G1 code (unitree_sdk2 g1/common/terminations.hpp) reads as temperature[0] = casing
+# (stop condition default 85 C) and [1] = winding (default 120 C); the 70-81 C seen on 2026-11-10 were the winding
+# (casing about 60 C) with no loss of torque. Unitree publishes no temperature where the motor starts to limit itself.
 # A motor the bridge commands at MAX_TEMP - 5 shows a warning on the PICO; above MAX_TEMP the bridge stops (3 s release). A leg motor (the robot's own) at 70 C or more only shows a warning.
 # MAX_TEMP=none (2026-11-10, operator's request, for one measurement run): the bridge does not stop on temperature
-# (--max-temp 200); the PICO warning still shows from 65 C. Above 70 C nothing from Unitree says the motors are safe,
-# and a protection inside the motor may cut the torque (the arm drops). Only with the robot hanging and someone at
+# (--max-temp 200); the PICO warning still shows from 65 C. Unitree's stop conditions are only sample defaults, and a
+# protection inside the motor may cut the torque (the arm drops). Only with the robot hanging and someone at
 # left X. Every other monitor (tracking error, lowstate, IK gap, left X) stays.
 # Temperature pause TEMP_PAUSE (IK --temp-pause; off = 0 by default): when the hottest arm/waist motor reaches it,
 # the arms glide back to the start pose (where they were at A, arms down) and pause (weight -> 0 in 2 s, no
-# emergency stop); A is refused until it is at or below TEMP_RESUME (default 60 C). Why: with the tool, the right
+# emergency stop); A is refused until it is at or below TEMP_RESUME (default 60 C). TEMP_PAUSE 40..79, below MAX_TEMP:
+# e.g. MAX_TEMP=80 TEMP_PAUSE=75 TEMP_RESUME=70 rests at 75 C and stops only at 80 C. Why: with the tool, the right
 # shoulder pitch rose about 1 C/s while following and a released arm still holds the tool where it stopped, so it
 # kept heating to the stop (59 -> 71 C in 14 s on 2026-11-10); after the stop it fell 71 -> 60 C in about 1.5 min.
 # Stop the arms at any time: left X/Y on the PICO or ~/nextech/arm_ik/stop.sh (arm_sdk weight -> 0 in 3 s: arms and
@@ -36,16 +41,16 @@ case "$MODE" in
 esac
 VEL=${2:-0.5}
 TOOL=${4:-hand}
-MAX_TEMP=${MAX_TEMP:-70}
+MAX_TEMP=${MAX_TEMP:-75}
 WAIST_CORRECT=${WAIST_CORRECT-}
 case "$WAIST_CORRECT" in ""|roll|pitch|roll,pitch|pitch,roll) ;; *) echo "WAIST_CORRECT must be empty, roll, pitch or roll,pitch"; exit 1 ;; esac
-case "$MAX_TEMP" in 5[0-9]|6[0-9]|70) BR_TEMP=$MAX_TEMP; IK_WARN=0 ;; none) BR_TEMP=200; IK_WARN=65 ;;
-  *) echo "MAX_TEMP must be 50..70 or none"; exit 1 ;; esac
+case "$MAX_TEMP" in 5[0-9]|6[0-9]|7[0-9]|80) BR_TEMP=$MAX_TEMP; IK_WARN=0 ;; none) BR_TEMP=200; IK_WARN=65 ;;
+  *) echo "MAX_TEMP must be 50..80 or none"; exit 1 ;; esac
 case "$TOOL" in hand|drill) ;; *) echo "tool must be hand or drill"; exit 1 ;; esac
 TEMP_PAUSE=${TEMP_PAUSE-0}
 TEMP_RESUME=${TEMP_RESUME:-60}
-case "$TEMP_PAUSE" in ""|0) TEMP_PAUSE=0 ;; [4-6][0-9]) ;; *) echo "TEMP_PAUSE must be 0 (off) or 40..69"; exit 1 ;; esac
-case "$TEMP_RESUME" in [3-6][0-9]) ;; *) echo "TEMP_RESUME must be 30..69"; exit 1 ;; esac
+case "$TEMP_PAUSE" in ""|0) TEMP_PAUSE=0 ;; [4-7][0-9]) ;; *) echo "TEMP_PAUSE must be 0 (off) or 40..79"; exit 1 ;; esac
+case "$TEMP_RESUME" in [3-7][0-9]) ;; *) echo "TEMP_RESUME must be 30..79"; exit 1 ;; esac
 if [ "$TEMP_PAUSE" != 0 ]; then
   [ "$TEMP_PAUSE" -lt "$BR_TEMP" ] || { echo "TEMP_PAUSE ($TEMP_PAUSE) must be below MAX_TEMP ($MAX_TEMP)"; exit 1; }
   [ "$TEMP_RESUME" -lt "$TEMP_PAUSE" ] || { echo "TEMP_RESUME ($TEMP_RESUME) must be below TEMP_PAUSE ($TEMP_PAUSE)"; exit 1; }
