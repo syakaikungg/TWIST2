@@ -10,6 +10,10 @@
 #   g1.sh dry  [max_vel] [seconds] [tool]   run_live.sh dry: IK + bridge, the bridge only logs (nothing is sent)
 #   g1.sh send [max_vel] [seconds] [tool]   run_live.sh send: the arms MOVE. Only after an explicit go, with the
 #                                           robot hanging on its rope while testing. Defaults 0.5 rad/s, 180 s, hand.
+#   g1.sh play dry|send [seconds] [motion]  run_play.sh: AUTOMATIC PLAYBACK of a fixed motion (default
+#                                           motions/drill_work.json) with cool-down breaks; send MOVES the arms (explicit
+#                                           go only, robot hanging in the lock stand). Defaults 600 s (send) / 60 s (dry).
+#                                           Settings WORK COOL TEMP_PAUSE TEMP_RESUME MAX_TEMP CYCLES SPEED PICO (run_play.sh)
 #   g1.sh stop                              stop.sh: the arms go back to the robot's own controller in 3 s (= left X)
 #   g1.sh status                            what runs on the G1 (read only): teleop state, ports, camera
 #   g1.sh ssh                               a shell on the G1
@@ -28,7 +32,7 @@ if [ ! -r "$KEY" ]; then
   echo "  ssh-keygen -t ed25519 -f $KEY && ssh-copy-id -i $KEY.pub $HOST"
   exit 1
 fi
-usage() { sed -n 4,22p "$0"; exit 1; }
+usage() { sed -n 4,26p "$0"; exit 1; }
 TTY=(); [ -t 0 ] && TTY=(-t)    # a terminal only when there is one (Claude runs this without one)
 
 cmd=${1:-}
@@ -68,6 +72,20 @@ case "$cmd" in
       temp="${temp}WAIST_CORRECT=$WAIST_CORRECT "
     fi
     exec "${SSH[@]}" "${temp}bash ~/nextech/arm_ik/run_live.sh $cmd $vel $secs $tool"
+    ;;
+  play)
+    mode=${1:-}; case "$mode" in dry|send) ;; *) echo "usage: g1.sh play dry|send [seconds] [motion.json]"; exit 1 ;; esac
+    secs=${2:-$([ "$mode" = send ] && echo 600 || echo 60)}; motion=${3:-motions/drill_work.json}
+    [[ "$secs" =~ ^[0-9]+$ ]] || { echo "seconds must be a whole number"; exit 1; }
+    [[ "$motion" =~ ^[A-Za-z0-9_./-]+\.json$ ]] || { echo "motion must be a .json path (letters, digits, _ . / -)"; exit 1; }
+    envs=""
+    for v in WORK COOL TEMP_PAUSE TEMP_RESUME MAX_TEMP CYCLES SPEED VEL PICO; do
+      if [ -n "${!v:-}" ]; then
+        [[ "${!v}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "$v must be a number"; exit 1; }
+        envs="${envs}$v=${!v} "
+      fi
+    done
+    exec "${SSH[@]}" "${envs}bash ~/nextech/arm_ik/run_play.sh $mode $secs $motion"
     ;;
   stop)
     exec "${SSH[@]}" "bash ~/nextech/arm_ik/stop.sh"

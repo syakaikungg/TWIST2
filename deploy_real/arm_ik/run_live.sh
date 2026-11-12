@@ -56,8 +56,8 @@ if [ "$TEMP_PAUSE" != 0 ]; then
   [ "$TEMP_RESUME" -lt "$TEMP_PAUSE" ] || { echo "TEMP_RESUME ($TEMP_RESUME) must be below TEMP_PAUSE ($TEMP_PAUSE)"; exit 1; }
 fi
 cd ~/nextech/arm_ik || exit 1
-if ps -eo cmd | grep -E 'arm_sdk_bridge|arm_ik_dryrun|arm_sim\.py|sim_run\.sh' | grep -v grep; then
-  echo "ABORT: a bridge / IK / simulator is already running (stop it first)"; exit 1
+if ps -eo cmd | grep -E 'arm_sdk_bridge|arm_ik_dryrun|play_motion|arm_sim\.py|sim_run\.sh' | grep -v grep; then
+  echo "ABORT: a bridge / IK / playback / simulator is already running (stop it first)"; exit 1
 fi
 export CYCLONEDDS_HOME=/home/unitree/cyclonedds_ws/install/cyclonedds
 export LD_LIBRARY_PATH=$CYCLONEDDS_HOME/lib:${LD_LIBRARY_PATH:-}
