@@ -222,18 +222,41 @@ def keyframes(md, work, spots=(0.0, -0.07, -0.14), push=0.04, twist=0.4, turn_pe
     def screw(offset_y, turn_deg, label):
         ax = rot_about_z(ax0, math.radians(turn_deg))
         spot = tip0 + np.array([0.0, offset_y, 0.0])
-        qa = solve(md, work, spot - ax * push, ax, 0.0)
-        qp = solve(md, qa, spot, ax, twist)
-        keys.append((qa, 0.3, label + " approach"))
-        keys.append((qp, 0.6 if not both else 0.3, label + " push + twist"))
+        ga, gp, gn = (spot - ax * push, ax, 0.0), (spot, ax, twist), (spot, ax, -twist)
+        qa = solve(md, work, *ga)
+        qp = solve(md, qa, *gp)
+        keys.append((qa, 0.3, label + " approach", ga))
+        keys.append((qp, 0.6 if not both else 0.3, label + " push + twist", gp))
         if both:
-            keys.append((solve(md, qp, spot, ax, -twist), 0.3, label + " twist back"))
-        keys.append((qa, 0.2, label + " back"))
+            keys.append((solve(md, qp, *gn), 0.3, label + " twist back", gn))
+        keys.append((qa, 0.2, label + " back", ga))
 
     for k, y in enumerate(spots):
         screw(y, y * turn_per_m, f"screw {k + 1} ({y * 100:+.0f} cm)")
-    keys.append((keys[0][0], 0.0, "screw 1 approach (loop)"))
+    keys.append((keys[0][0], 0.0, "screw 1 approach (loop)", keys[0][3]))
     return keys
+
+
+def tracked_segment(md, qa, ga, gb, rate, vmax, tmin):
+    """From key qa (goal ga) to goal gb with the driver tip on the straight line between the goals all the way
+    (IK solved for every frame): with the chuck off the wrist roll axis, a plain joint interpolation of a wrist
+    twist would swing the tip off the screw. The time is stretched until the peak joint speed is within vmax."""
+    (ta, aa, ra), (tb, ab, rb) = ga, gb
+    T = max(tmin, 1.875 * abs(rb - ra) / vmax, 1.875 * float(np.linalg.norm(tb - ta)) / 0.05)
+    for _ in range(6):
+        n = max(2, int(round(T * rate)) + 1)
+        sp = np.linspace(0.0, 1.0, n)
+        sp = 10 * sp ** 3 - 15 * sp ** 4 + 6 * sp ** 5
+        q, out = dict(qa), []
+        for s_ in sp[1:]:
+            ax = aa + (ab - aa) * s_
+            q = solve(md, q, ta + (tb - ta) * s_, ax / np.linalg.norm(ax), ra + (rb - ra) * s_, iters=60)
+            out.append(vec(q))
+        pk = float(np.max(np.abs(np.diff(np.array([vec(qa)] + out), axis=0)))) * rate
+        if pk <= vmax * 1.02:
+            return out
+        T *= pk / vmax * 1.05
+    return out
 
 
 def min_jerk(a, b, n):
@@ -292,10 +315,17 @@ def main():
         keys = keyframes(md, work, spots=spots, push=args.push, twist=args.twist, both=args.twist_both)
         frames = [vec(keys[0][0])]
         labels = []
-        for (qa, hold, la), (qb, _, lb) in zip(keys[:-1], keys[1:]):
+        qcur = dict(keys[0][0])
+        for (qa, hold, la, ga), (qb, _, lb, gb) in zip(keys[:-1], keys[1:]):
             if hold > 0:
                 frames += [frames[-1]] * int(round(hold * args.rate))
-            frames += list(segment(vec(qa), vec(qb), args.rate, args.max_vel, 0.6))
+            if args.twist_both and ga[2] != gb[2] and lb != keys[-1][2]:   # a wrist twist: tip stays on its line
+                seg = tracked_segment(md, qcur, ga, gb, args.rate, args.max_vel, 0.6)
+                qcur = dict(zip(ARM, seg[-1]))
+            else:
+                seg = list(segment(vec(qcur), vec(qb), args.rate, args.max_vel, 0.6))
+                qcur = dict(qb)
+            frames += seg
             labels.append(la)
         loop = np.array(frames)
         ok = True
