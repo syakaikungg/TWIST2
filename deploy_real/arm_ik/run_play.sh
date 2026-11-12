@@ -7,13 +7,17 @@
 #   run_play.sh send [seconds=600] [motion=motions/drill_work.json]   the arms MOVE (only after an explicit go, the
 #                                                                      robot hanging in the lock stand, L2+up)
 # Cycle: arms glide to the rest pose (arms down, driver down) -> WORK s of the motion's loop -> back to rest ->
-# rest at least COOL s and until the hottest arm/waist motor is at or below TEMP_RESUME C -> WORK again ...
+# rest at least COOL s and until the hottest arm motor is at or below TEMP_RESUME C -> WORK again ...
 # WORK ends early at TEMP_PAUSE C. At the end the arms glide back to where they were at the start and the robot's
 # own controller takes them (weight -> 0 in 2 s).
 # Settings (environment): WORK (30 s), COOL (60 s), TEMP_PAUSE (65 C), TEMP_RESUME (58 C), MAX_TEMP (the bridge's
 # stop, 75 C, 50..80), CYCLES (0 = until the seconds run out), SPEED (1.0: loop speed), VEL (0.5 rad/s: the bridge's
-# joint speed limit), PICO (1: left X/Y = emergency stop, right A = pause at rest / resume; 0 = do not read the PICO).
-# e.g. WORK=20 COOL=90 bash run_play.sh send 900
+# joint speed limit), PICO (1: left X/Y = emergency stop, right A = pause at rest / resume; 0 = do not read the PICO),
+# TEMP_SCOPE (arm: TEMP_PAUSE/TEMP_RESUME look at the arms only, the waist only at the bridge's MAX_TEMP stop;
+# all: arms + waist, as before).
+# WORK=0: STAND-BY, the arms only hold the rest pose under the bridge (soft waist, ~3 Nm on waist roll instead of
+# ~5-6 Nm in the lock stand, so it cools), until the seconds run out or a stop.
+# e.g. WORK=20 COOL=90 bash run_play.sh send 900      WORK=0 bash run_play.sh send 3600
 # Stop: left X/Y on the PICO (if connected), ~/nextech/arm_ik/stop.sh (g1.sh stop on the PC), or the remote's
 # L2+B (whole-body damping, last resort). The bridge also stops by itself on MAX_TEMP, tracking error, lowstate gap.
 MODE=${1:-}
@@ -25,6 +29,8 @@ esac
 MOTION=${3:-motions/drill_work.json}
 WORK=${WORK:-30}; COOL=${COOL:-60}; TEMP_PAUSE=${TEMP_PAUSE:-65}; TEMP_RESUME=${TEMP_RESUME:-58}
 MAX_TEMP=${MAX_TEMP:-75}; CYCLES=${CYCLES:-0}; SPEED=${SPEED:-1.0}; VEL=${VEL:-0.5}; PICO=${PICO:-1}
+TEMP_SCOPE=${TEMP_SCOPE:-arm}
+case "$TEMP_SCOPE" in arm|all) ;; *) echo "TEMP_SCOPE must be arm or all"; exit 1 ;; esac
 num() { [[ "$2" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "$1 must be a number"; exit 1; }; }
 num seconds "$SECS"; num WORK "$WORK"; num COOL "$COOL"; num CYCLES "$CYCLES"; num SPEED "$SPEED"; num VEL "$VEL"
 case "$MAX_TEMP" in 5[0-9]|6[0-9]|7[0-9]|80) ;; *) echo "MAX_TEMP must be 50..80"; exit 1 ;; esac
@@ -46,14 +52,14 @@ export LD_LIBRARY_PATH=$CYCLONEDDS_HOME/lib:${LD_LIBRARY_PATH:-}
 TS=$(date +%Y%m%d_%H%M%S)
 L=~/nextech_setup/logs
 echo "play $MODE, $SECS s, motion $MOTION, work $WORK s, cool >= $COOL s and <= $TEMP_RESUME C, early rest at $TEMP_PAUSE C," \
-     "bridge stop at $MAX_TEMP C, cycles ${CYCLES/#0/unlimited}, speed x$SPEED, max-vel $VEL rad/s, pico $PICO"
+     "(${TEMP_SCOPE} motors), bridge stop at $MAX_TEMP C, cycles ${CYCLES/#0/unlimited}, speed x$SPEED, max-vel $VEL rad/s, pico $PICO"
 nohup python3 -u arm_sdk_bridge.py $SEND --max-vel "$VEL" --duration "$SECS" --max-temp "$MAX_TEMP" \
   --waist-correct "" > "$L/play_bridge_${MODE}_$TS.txt" 2>&1 < /dev/null &
 BR_PID=$!
 echo "bridge pid $BR_PID"
 sleep 4
 nohup "$PY" -u play_motion.py --motion "$MOTION" --work "$WORK" --cool "$COOL" --temp-pause "$TEMP_PAUSE" \
-  --temp-resume "$TEMP_RESUME" --cycles "$CYCLES" --duration $(( ${SECS%.*} - 2 )) --speed "$SPEED" --max-vel "$VEL" \
+  --temp-resume "$TEMP_RESUME" --temp-scope "$TEMP_SCOPE" --cycles "$CYCLES" --duration $(( ${SECS%.*} - 2 )) --speed "$SPEED" --max-vel "$VEL" \
   $PICO_ARG > "$L/play_motion_${MODE}_$TS.txt" 2>&1 < /dev/null &
 PLAY_PID=$!
 echo "play pid $PLAY_PID"

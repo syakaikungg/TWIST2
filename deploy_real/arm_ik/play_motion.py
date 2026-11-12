@@ -4,9 +4,11 @@
 For the exhibition: no operator in the headset. A motion file (design_motion.py, or a teleop log cut with
 log_to_motion.py) holds a rest pose and a loop of 14 arm joint angles. The cycle is
   glide to rest -> WORK: glide to the loop's start, play the loop over and over for --work s -> glide to rest ->
-  COOL: hold the rest pose for at least --cool s and until the hottest arm/waist motor is at or below
+  COOL: hold the rest pose for at least --cool s and until the hottest arm motor is at or below
   --temp-resume C -> WORK again ...
-WORK ends early when that motor reaches --temp-pause C. The bridge's own monitors stay (its --max-temp stop,
+WORK ends early when that motor reaches --temp-pause C (--temp-scope all: arms and waist, as before; the waist
+does not move in the playback, its heat comes from holding the off-centre arm and the legs, so by default it is
+shown but only the bridge's --max-temp stop watches it). The bridge's own monitors stay (its --max-temp stop,
 tracking error, lowstate, stop.sh). At the end (--duration, --cycles, SIGTERM / Ctrl+C) the arms glide back to the
 pose they had at the start, then the bridge hands them back to the robot's controller (weight -> 0 in 2 s).
 
@@ -113,12 +115,15 @@ def glide_time(a, b, vel, tmin=1.0):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--motion", default=str(Path(__file__).with_name("motions") / "drill_work.json"))
-    ap.add_argument("--work", type=float, default=30.0, help="seconds of the loop per cycle")
+    ap.add_argument("--work", type=float, default=30.0, help="seconds of the loop per cycle (0 = STAND-BY: only "
+                    "hold the rest pose under the bridge, soft waist, until the end or a stop)")
     ap.add_argument("--cool", type=float, default=60.0, help="minimum rest between cycles [s]")
     ap.add_argument("--temp-pause", type=float, default=65.0,
-                    help="end the work early when the hottest arm/waist motor reaches this [C] (0 = off)")
+                    help="end the work early when the hottest arm motor reaches this [C] (0 = off)")
     ap.add_argument("--temp-resume", type=float, default=58.0,
-                    help="the rest lasts until the hottest arm/waist motor is at or below this [C]")
+                    help="the rest lasts until the hottest arm motor is at or below this [C]")
+    ap.add_argument("--temp-scope", choices=["arm", "all"], default="arm",
+                    help="motors for --temp-pause/--temp-resume: arm = arms only (default), all = arms + waist")
     ap.add_argument("--cycles", type=int, default=0, help="number of work periods (0 = until --duration)")
     ap.add_argument("--duration", type=float, default=600.0, help="total seconds, end included (0 = no limit)")
     ap.add_argument("--speed", type=float, default=1.0, help="play the loop faster (>1) or slower (<1)")
@@ -237,7 +242,8 @@ def main():
         if p != phase:
             b = bridge_status() or {}
             print(f"[{now - t0:6.1f}s] {phase} -> {p}{' (' + why + ')' if why else ''}  "
-                  f"hottest {b.get('temp_joint', '?')} {b.get('temp', 0):.0f} C, leg {b.get('leg_temp', 0):.0f} C")
+                  f"hottest {b.get('temp_joint', '?')} {b.get('temp', 0):.0f} C, arm {b.get('arm_joint', '?')} "
+                  f"{b.get('arm_temp', 0):.0f} C, waist {b.get('waist_temp', 0):.0f} C, leg {b.get('leg_temp', 0):.0f} C")
         phase, t_phase = p, now
 
     def start_glide(target, then, now, vel=None):
@@ -252,7 +258,7 @@ def main():
             estop, reason = True, why
             set_phase("ESTOP", now, why)
 
-    def display(now, b, temp, tj, leg, lj):
+    def display(now, b, temp, tj, leg, lj, wt=0.0, wj=""):
         tl = f"{joint_ja(tj)} {temp:.0f}℃" if temp > 0 else ""
         if phase == "ESTOP":
             lv, ja, en = "stop", f"非常停止（PCから再起動が必要）{reason}", "E-STOP - restart from PC"
@@ -260,7 +266,9 @@ def main():
             left = max(0.0, args.work - work_t)
             lv, ja, en = "ok", f"自動再生 {cycle}回目 作業中 あと{left:.0f}秒 ／ {tl}", f"PLAY #{cycle} {left:.0f}s left"
         elif phase == "COOL":
-            if paused:
+            if args.work <= 0:
+                lv, ja, en = "idle", f"待機中（腕は休みの姿勢）／ {tl}", "STAND-BY"
+            elif paused:
                 lv, ja, en = "idle", f"一時停止中（右Aで再開）／ {tl}", "PAUSED - A to resume"
             else:
                 left = max(0.0, args.cool - (now - t_phase))
@@ -277,7 +285,8 @@ def main():
         return {"t": now, "level": lv, "ja": ja, "en": en, "ik": "PLAY_" + phase,
                 "bridge": b.get("state") if b else None, "weight": b.get("weight") if b else None,
                 "reason": reason or (b.get("reason", "") if b else ""), "drill": 0,
-                "temp": round(temp, 1), "temp_joint": tj, "leg_temp": round(leg, 1), "leg_joint": lj}
+                "temp": round(temp, 1), "temp_joint": tj, "leg_temp": round(leg, 1), "leg_joint": lj,
+                "waist_temp": round(wt, 1), "waist_joint": wj}
 
     pico_fresh = False
     try:
@@ -288,6 +297,10 @@ def main():
             meas = measured()
             temp = float(b.get("temp", 0.0) or 0.0) if b else 0.0
             tj = str(b.get("temp_joint", "") or "") if b else ""
+            wt = float(b.get("waist_temp", 0.0) or 0.0) if b else 0.0
+            wj = str(b.get("waist_joint", "") or "") if b else ""
+            if args.temp_scope == "arm" and b and "arm_temp" in b:
+                temp, tj = float(b.get("arm_temp") or 0.0), str(b.get("arm_joint") or "")
             leg = float(b.get("leg_temp", 0.0) or 0.0) if b else 0.0
             lj = str(b.get("leg_joint", "") or "") if b else ""
             bstate = b.get("state") if b else None
@@ -394,12 +407,13 @@ def main():
                     stats[-1]["cool_s"] = round(now - t_phase, 1)
                 # time for one more work period (at least 10 s of it) and the way back?
                 need = (glide_time(q, loop[0], args.glide_vel) + min(args.work, 10.0)
-                        + glide_time(loop[0], q_start, args.glide_vel) + 8.0)
+                        + glide_time(loop[0], q_start, args.glide_vel) + 8.0) if args.work > 0 \
+                    else glide_time(q, q_start, args.glide_vel) + 8.0   # stand-by: only the way back
                 if args.cycles and cycle >= args.cycles:
                     finish_now(f"{cycle} cycles done")
                 elif args.duration and args.duration - t < need:
                     finish_now("not enough time left for another work period")
-                elif cooled and not paused:
+                elif cooled and not paused and args.work > 0:
                     start_glide(loop[0], "WORK", now)
             elif phase == "RELEASE":
                 if bstate in ("WAIT", None) or now - t_phase > 5.0:
@@ -415,7 +429,7 @@ def main():
                                                 "q": [float(v) for v in qp], "source": "play_motion"}))
             rds.set("drill_cmd", json.dumps({"t": now, "on": 0, "trigger": 0.0}))
             rds.hset("teleop_state", "ik", json.dumps({"t": now, "state": "PLAY_" + phase, "reason": reason}))
-            rds.set("teleop_display", json.dumps(display(now, b, temp, tj, leg, lj), ensure_ascii=False))
+            rds.set("teleop_display", json.dumps(display(now, b, temp, tj, leg, lj, wt, wj), ensure_ascii=False))
             nan = [np.nan] * 14
             log.writerow([f"{t:.3f}", phase, cycle, bstate, b.get("weight") if b else "", f"{temp:.1f}", tj,
                           f"{leg:.1f}", int(pico_fresh), reason]
@@ -423,7 +437,8 @@ def main():
                          + [f"{v:.4f}" for v in (meas if meas is not None else nan)])
             if t - last_print >= 10.0:
                 last_print = t
-                print(f"[{t:6.1f}s] {phase} cycle {cycle} bridge {bstate} hottest {tj} {temp:.0f} C leg {leg:.0f} C")
+                print(f"[{t:6.1f}s] {phase} cycle {cycle} bridge {bstate} hottest {tj} {temp:.0f} C "
+                      f"waist {wj} {wt:.0f} C leg {leg:.0f} C")
             if estop and (bstate in ("STOPPED", None) or now - t_phase > 6.0):
                 break
             next_t += dt
