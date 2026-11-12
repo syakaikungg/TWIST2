@@ -208,12 +208,13 @@ def rot_about_z(v, ang):
     return np.array([c * v[0] - s * v[1], s * v[0] + c * v[1], v[2]])
 
 
-def keyframes(md, work, spots=(0.0, -0.07, -0.14), push=0.04, twist=0.4, turn_per_m=150.0):
+def keyframes(md, work, spots=(0.0, -0.07, -0.14), push=0.04, twist=0.4, turn_per_m=150.0, both=False):
     """Key poses of one loop and the time to hold each (seconds). The loop starts and ends at the first screw's
     approach pose. Screws at sideways offsets `spots` from the work pose [m] (- = outward, to the robot's right:
     inward the battery under the wrist comes to the hip); the driver turns turn_per_m deg per m with them. Each:
     approach (driver `push` m back), push in while twisting the wrist roll (driving the screw), hold, back out
-    while untwisting."""
+    while untwisting. both=True: pushed in, the wrist roll turns +twist then -twist (right and left) before backing
+    out."""
     md.set(work)
     tip0, ax0 = md.tip(), md.axis()
     keys = []
@@ -224,7 +225,9 @@ def keyframes(md, work, spots=(0.0, -0.07, -0.14), push=0.04, twist=0.4, turn_pe
         qa = solve(md, work, spot - ax * push, ax, 0.0)
         qp = solve(md, qa, spot, ax, twist)
         keys.append((qa, 0.3, label + " approach"))
-        keys.append((qp, 0.6, label + " push + twist"))
+        keys.append((qp, 0.6 if not both else 0.3, label + " push + twist"))
+        if both:
+            keys.append((solve(md, qp, spot, ax, -twist), 0.3, label + " twist back"))
         keys.append((qa, 0.2, label + " back"))
 
     for k, y in enumerate(spots):
@@ -266,6 +269,8 @@ def main():
                     help="sideways offsets of the screws from the work pose [m] (- = outward)")
     ap.add_argument("--push", type=float, default=0.04, help="push in along the driver [m]")
     ap.add_argument("--twist", type=float, default=0.4, help="wrist roll twist while pushing in [rad]")
+    ap.add_argument("--twist-both", action="store_true", help="pushed in, turn the wrist roll +twist then -twist")
+    ap.add_argument("--tip-z", default="0.50,1.05", help="driver tip height range at the work pose (world z) [m]")
     ap.add_argument("--down", default="-2,4", help="driver angle below horizontal at the work pose [deg] "
                     "(-2,4 = level, the default since 11/12 at the operator's request; motions/drill_work_down.json: "
                     "--down 30,50 --tip-x 0.22)")
@@ -281,9 +286,10 @@ def main():
     dn = [float(v) for v in args.down.split(",")]
     spots = [float(v) for v in args.spots.split(",")]
     tried = 0
-    for work in search_work(md, left, down=(dn[0], dn[1]), tip_x=args.tip_x):
+    tz = [float(v) for v in args.tip_z.split(",")]
+    for work in search_work(md, left, down=(dn[0], dn[1]), tip_x=args.tip_x, tip_z=(tz[0], tz[1])):
         tried += 1
-        keys = keyframes(md, work, spots=spots, push=args.push, twist=args.twist)
+        keys = keyframes(md, work, spots=spots, push=args.push, twist=args.twist, both=args.twist_both)
         frames = [vec(keys[0][0])]
         labels = []
         for (qa, hold, la), (qb, _, lb) in zip(keys[:-1], keys[1:]):
