@@ -151,13 +151,13 @@ def search_rest(md, left, clear=0.04):
     raise SystemExit("no rest pose found")
 
 
-def search_work(md, left, down=(30.0, 50.0), tip_x=0.22, tip_z=(0.50, 0.85)):
+def search_work(md, left, down=(30.0, 50.0), tip_x=0.22, tip_z=(0.50, 1.05)):
     """Candidate work poses, lowest load first: driver tip in front of the body, pointing forward and down `down`
     degrees, 6 cm clear of the body. A generator: the caller takes the first whose whole loop stays clear."""
     cands = []
     for sp in np.arange(-0.40, 0.41, 0.05):
         for sr in np.arange(-0.35, -0.04, 0.05):
-            for el in np.arange(0.20, 1.31, 0.05):
+            for el in np.arange(-0.30, 1.31, 0.05):
                 for wp in np.arange(-0.80, 0.81, 0.10):
                     q = dict(left, **{n: 0.0 for n in RIGHT})
                     q.update({RIGHT[0]: sp, RIGHT[1]: sr, RIGHT[3]: el, RIGHT[5]: wp})
@@ -266,8 +266,12 @@ def main():
                     help="sideways offsets of the screws from the work pose [m] (- = outward)")
     ap.add_argument("--push", type=float, default=0.04, help="push in along the driver [m]")
     ap.add_argument("--twist", type=float, default=0.4, help="wrist roll twist while pushing in [rad]")
-    ap.add_argument("--down", default="30,50", help="driver angle below horizontal at the work pose [deg]")
+    ap.add_argument("--down", default="-2,4", help="driver angle below horizontal at the work pose [deg] "
+                    "(-2,4 = level, the default since 11/12 at the operator's request; motions/drill_work_down.json: "
+                    "--down 30,50 --tip-x 0.22)")
     ap.add_argument("--clear", type=float, default=0.04, help="distance kept from the body and the left arm [m]")
+    ap.add_argument("--tip-x", type=float, default=0.30, help="driver tip at least this far in front of the "
+                    "shoulders at the work pose [m]")
     args = ap.parse_args()
 
     t0 = time.time()
@@ -277,7 +281,7 @@ def main():
     dn = [float(v) for v in args.down.split(",")]
     spots = [float(v) for v in args.spots.split(",")]
     tried = 0
-    for work in search_work(md, left, down=(dn[0], dn[1])):
+    for work in search_work(md, left, down=(dn[0], dn[1]), tip_x=args.tip_x):
         tried += 1
         keys = keyframes(md, work, spots=spots, push=args.push, twist=args.twist)
         frames = [vec(keys[0][0])]
@@ -341,9 +345,9 @@ def main():
     }
     out = {
         "format": "g1_arm_motion/1",
-        "name": "drill_work",
-        "description": "driver work: upper arm hanging, driver forward and down; three screws (push, wrist twist, "
-                       "back) with sideways steps by the shoulder yaw. Rest: arms hanging, driver down.",
+        "name": Path(args.out).stem,
+        "description": f"driver work: upper arm down, driver forward, {dn[0]:g}..{dn[1]:g} deg below level; screws at "
+                       f"{args.spots} m sideways (push in with a wrist twist, back). Rest: arms down, driver down.",
         "created": time.strftime("%Y-%m-%d %H:%M:%S"),
         "source": "design_motion.py",
         "rate": args.rate,

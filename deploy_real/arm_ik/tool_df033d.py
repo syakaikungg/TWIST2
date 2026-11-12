@@ -1,13 +1,15 @@
 """The real tool on the right wrist (2026-11-12 photos): a Makita DF033D driver drill clamped by its grip to a
 stainless plate on a quick coupler at the wrist flange, where the hand was.
 
-Seen on the photos (sizes are estimates from the photos, not measured): the chuck points along the forearm (the
-wrist yaw link's x), the drill's head about 13 cm above the forearm axis and the grip and battery below it
-(with the wrist at 0 and the forearm level: head up, battery down, as a person holds a drill). A trigger servo
-and cables sit beside the grip.
-Masses: the drill without battery 0.72 kg (Makita's spec, "net weight (skin)"); the battery, the coupler and plate,
-the servo and cables are guesses (0.2 + 0.35 + 0.08 kg). About 1.35 kg in all, centre of mass about 8 cm past
-the flange and 2 cm above the forearm axis. Change MASS / the boxes when the real values are known.
+Makita's specs: length 149 mm, width 66 mm, height 229 mm (top of the head to the bottom of the battery), net
+weight 0.72 kg without battery, 0.9-1.1 kg with a battery (EPTA). Placement from the photos, scaled by those
+sizes (estimates, not measured): the chuck points along the forearm (the wrist yaw link's x), its tip about 20 cm
+past the flange; the head's axis about 10 cm above the forearm axis; the grip and battery below it (with the wrist
+at 0 and the forearm level: head up, battery down, as a person holds a drill); the coupler about 4 cm long. A
+trigger servo sits beside the grip.
+Masses: drill 0.95 kg with its battery (within Makita's 0.9-1.1 kg); the coupler, plate and servo are guesses
+(0.20 + 0.15 + 0.08 kg). About 1.38 kg in all, centre of mass about 9 cm past the flange and 2 cm above the forearm
+axis. Change PARTS when the real values are known.
 
   import tool_df033d
   tool_df033d.add_tool(spec)          # MjSpec of the G1 model, before compile(); takes the right hand's mesh off
@@ -21,18 +23,18 @@ import sim_drill
 PARENT = "right_wrist_yaw_link"
 FLANGE = list(sim_drill.FLANGE)          # where the hand was bolted, in the wrist yaw frame
 BODY = "tool_df033d"
-CHUCK_TIP = np.array([0.255, 0.0, 0.13])     # from the flange, in the wrist yaw frame
+CHUCK_TIP = np.array([0.200, 0.0, 0.10])     # from the flange, in the wrist yaw frame
 CHUCK_DIR = np.array([1.0, 0.0, 0.0])
 TEAL, BLACK, STEEL, ALU = [0.0, 0.55, 0.55, 1.0], [0.08, 0.08, 0.08, 1.0], [0.72, 0.72, 0.75, 1.0], [0.8, 0.8, 0.82, 1.0]
 # name, type, size (MuJoCo half sizes / radius+half length), pos from the flange, mass [kg], rgba, along x
 PARTS = (
-    ("coupler", "cyl", [0.034, 0.025], [0.025, 0.0, 0.0], 0.20, ALU, True),
-    ("plate", "box", [0.060, 0.002, 0.080], [0.110, -0.030, 0.0], 0.15, STEEL, False),   # on the outer side
-    ("head", "cyl", [0.034, 0.075], [0.115, 0.0, 0.13], 0.45, TEAL, True),
-    ("chuck", "cyl", [0.013, 0.025], [0.215, 0.0, 0.13], 0.05, BLACK, True),
-    ("grip", "box", [0.025, 0.022, 0.065], [0.090, 0.0, 0.035], 0.22, BLACK, False),
-    ("battery", "box", [0.045, 0.030, 0.035], [0.090, 0.0, -0.065], 0.20, TEAL, False),
-    ("servo", "box", [0.020, 0.012, 0.025], [0.150, 0.0, 0.05], 0.08, BLACK, False),
+    ("coupler", "cyl", [0.034, 0.019], [0.019, 0.0, 0.0], 0.20, ALU, True),
+    ("plate", "box", [0.065, 0.002, 0.070], [0.105, -0.030, -0.020], 0.15, STEEL, False),   # on the outer side
+    ("head", "cyl", [0.033, 0.057], [0.108, 0.0, 0.10], 0.45, TEAL, True),      # 149 mm with the chuck
+    ("chuck", "cyl", [0.013, 0.0175], [0.1825, 0.0, 0.10], 0.05, BLACK, True),
+    ("grip", "box", [0.025, 0.022, 0.065], [0.087, 0.0, 0.005], 0.22, BLACK, False),
+    ("battery", "box", [0.040, 0.033, 0.024], [0.087, 0.0, -0.074], 0.23, TEAL, False),   # bottom 229 mm below the top
+    ("servo", "box", [0.020, 0.012, 0.025], [0.130, 0.0, 0.030], 0.08, BLACK, False),
 )
 MASS = sum(p[4] for p in PARTS)
 _Z_TO_X = [np.cos(np.pi / 4), 0.0, np.sin(np.pi / 4), 0.0]

@@ -14,7 +14,7 @@ NexTech Week 2026 秋の展示用。G1 の内蔵PC（`~/nextech/arm_ik/`）で�
 | `stop.sh` | 非常停止（Redis `teleop_stop`） |
 | `play_motion.py` / `run_play.sh` | 自動再生（展示用、11/12〜）。決まった腕の動き（動きのファイル）を、作業と休憩を挟んで繰り返す。IK の代わりにブリッジへ角度を渡すので、ブリッジの見張りはそのまま。`g1.sh play send 600` で起動。下の「自動再生」 |
 | `design_motion.py` | 自動再生の「ドライバー作業」の動き（`motions/drill_work.json`）を、シミュレーターのモデルで重力のトルクが小さくなるように作る |
-| `tool_df033d.py` | 右手首の実物の工具（マキタ DF033D と取り付け板、11/12 の写真から。寸法と付属品の重さは推定）の形と重さ。`arm_sim.py --tool df033d`、`render_front.py --tool df033d`、`design_motion.py` が使う（テレオペの IK の当たり判定は今までどおり `sim_drill.py`） |
+| `tool_df033d.py` | 右手首の実物の工具（マキタ DF033D と取り付け板。ドリルの寸法と重さはマキタの仕様、付け方は11/12 の写真から、板・カプラー・サーボの重さは推定）の形と重さ。`arm_sim.py --tool df033d`、`render_front.py --tool df033d`、`design_motion.py` が使う（テレオペの IK の当たり判定は今までどおり `sim_drill.py`） |
 | `log_to_motion.py` | テレオペのログ（ブリッジか IK の CSV）の好きな区間を、自動再生の動きのファイルにする |
 | `place_play.sh` | 操作用のPCから、自動再生のファイルを G1 の `~/nextech/arm_ik/` に置く（置き換えるファイルは `.bak_日時` で残す） |
 | `after_boot.sh` | G1 を再起動したあとの準備（Redis と PC Service、頭カメラの USB 省電力オフ、頭カメラ → PICO を `0.0.0.0:13579` で待つ＝有線と Wi-Fi の両方。`CAM_LISTEN` で変えられる）。`install_autostart.sh` のあとは sudo を使わず、パスワードも聞かない。ロボットは動かさない |
@@ -63,14 +63,15 @@ bash g1.sh stop                                  # 止める（= PICO の左 X�
 
 ### 動き `motions/drill_work.json`（`design_motion.py` で作る）
 
-- 上腕は下ろして少し後ろ、前腕を斜め前下に出して、ドライバーを前下（約33°下）に向ける。ネジ3か所（正面、外へ7cm、外へ14cm）で、4cm 押し込みながら手首を0.4 rad ひねり（ネジを締める風）、戻す。1周約18秒。内側へ動かすと手首の下のバッテリーが股関節に近づくので、外側だけに動かす
+- 上腕は下ろして少し後ろ、前腕を斜め前下に出し、手首を上に曲げて、ドライバーを前に水平に向ける（人がドリルを持つ向き：グリップとバッテリーが下。11/12 本人「前に水平に出したい」）。チャックの先は肩から約31cm前。ネジ3か所（正面、外へ7cm、外へ14cm）で、4cm 押し込みながら手首を0.4 rad ひねり（ネジを締める風）、戻す。1周約19秒。内側へ動かすと手首の下のバッテリーが股関節に近づくので、外側だけに動かす
 - 腕を前に伸ばす、横に大きく開く、肘を伸ばしきる動きは使わない（11/10 の実測で熱くなった姿勢）
 - 左腕は下ろしたまま、腰はまっすぐ（ブリッジの `--waist-level`）
-- 重力のトルクの見積もり（工具は推定1.35 kg、`tool_df033d.py`）：作業中の RMS で右肩 pitch 0.7、右肩 roll 3.8、右肩 yaw 2.2、右肘 3.0、右手首 pitch 2.6 Nm。11/10 の追従中の実測は右肩 pitch 平均4〜6 Nm、横に開くと肩 roll 7〜11 Nm、右肘5.2 Nm。休む姿勢は右肘0.1、右手首 pitch 0.1、右肩 roll 2.9 Nm（純正のロック立ちの腕の姿勢だと右肘2.3、手首 pitch 1.5、肩 roll 2.5 Nm）
-- 体や左腕から4cm 以上（モデルの凸包で）離す。シミュレーター（`arm_sim.py --tool df033d`＋ブリッジ `--sim`）で接触なし、ずれ最大0.06 rad
+- 重力のトルクの見積もり（工具は推定1.38 kg、`tool_df033d.py`）：作業中の RMS で右肩 pitch 2.0、右肩 roll 2.2、右肩 yaw 1.3、右肘 4.6、右手首 pitch 2.8 Nm。11/10 の追従中の実測は右肩 pitch 平均4〜6 Nm、横に開くと肩 roll 7〜11 Nm、右肘5.2 Nm（180秒で47→61℃）なので、いちばん温まりやすいのは右肘。休む姿勢は右肘0.1、右手首 pitch 0.0、右肩 roll 2.9 Nm（純正のロック立ちの腕の姿勢だと右肘2.3、手首 pitch 1.5、肩 roll 2.5 Nm）
+- `motions/drill_work_down.json`：ドライバーを約33°下に向ける版（11/12 の最初の案）。右肩 pitch 0.8、roll 4.4、肘2.7、手首 pitch 2.4 Nm で、肘が楽な代わりに肩 roll が重い。`bash g1.sh play send 600 motions/drill_work_down.json`
+- 体や左腕から4cm 以上（モデルの凸包で）離す。シミュレーター（`arm_sim.py --tool df033d`＋ブリッジ `--sim`）で接触なし
 - 右手首 pitch は小さいモーター（最大5 Nm）なので、最初の実機では温度を見る
 
-作り直し：`python3 design_motion.py --out motions/drill_work.json`（`--spots 0,-0.07,-0.14`（ネジの横の位置）、`--push 0.04`、`--twist 0.4`、`--down 30,50`（ドライバーの下向きの角度）、`--max-vel 0.4`）。工具の寸法・重さが分かったら `tool_df033d.py` の `PARTS` を直して作り直す。
+作り直し：`python3 design_motion.py --out motions/drill_work.json`（`--down -2,4`（ドライバーの下向きの角度、既定は水平）、`--tip-x 0.30`（チャックの先を肩から何m前に）、`--spots 0,-0.07,-0.14`（ネジの横の位置）、`--push 0.04`、`--twist 0.4`、`--max-vel 0.4`）。下向きの版は `--down 30,50 --tip-x 0.22 --out motions/drill_work_down.json`。工具の寸法・重さが分かったら `tool_df033d.py` の `PARTS` を直して作り直す。
 
 ### テレオペで動きを作る
 
