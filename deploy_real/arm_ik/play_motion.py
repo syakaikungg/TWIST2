@@ -15,6 +15,10 @@ pose they had at the start, then the bridge hands them back to the robot's contr
 Like the IK it writes Redis `arm_ik_q` (50 Hz, the bridge needs it fresh), `drill_cmd` (always OFF),
 `teleop_state/ik` and `teleop_display` (PICO video overlay), and it reads `arm_state` (measured angles) and
 `teleop_state/bridge` (state, hottest motor). It sends nothing to the robot itself.
+Pause: Redis `play_hold` (g1.sh pause / resume) = the same as the PICO's right A: the work ends, the arms stay at the
+rest pose and the bridge keeps holding arms and waist softly (no hand-back to the robot's stiff lock stand, so the
+waist does not heat up) until it is deleted. With --duration 0 the playback runs until a stop, so pause / resume is
+the only way to stop and restart the work.
 Stops: `stop.sh` (Redis teleop_stop) and everything the bridge watches; with --pico also the PICO's left X / Y
 (EMERGENCY STOP, latched) and right A (pause at rest / resume). Without PICO data the playback carries on.
 
@@ -158,6 +162,9 @@ def main():
         sys.exit("--temp-resume must be below --temp-pause")
 
     rds = redis.Redis(host=args.redis_host, port=6379)
+    if not args.check and rds.exists("play_hold"):
+        rds.delete("play_hold")
+        print("play_hold was set: cleared (the playback starts working; g1.sh pause to hold)")
 
     def on_sigterm(signum, frame):
         raise StopRequested("SIGTERM")
@@ -236,6 +243,7 @@ def main():
     dt = 1.0 / args.rate
     next_t = t0
     last_print = -10.0
+    last_hold = False
 
     def set_phase(p, now, why=""):
         nonlocal phase, t_phase
@@ -268,8 +276,8 @@ def main():
         elif phase == "COOL":
             if args.work <= 0:
                 lv, ja, en = "idle", f"待機中（腕は休みの姿勢）／ {tl}", "STAND-BY"
-            elif paused:
-                lv, ja, en = "idle", f"一時停止中（右Aで再開）／ {tl}", "PAUSED - A to resume"
+            elif paused or last_hold:
+                lv, ja, en = "idle", f"一時停止中（{'右A' if paused else 'PCのresume'}で再開）／ {tl}", "PAUSED"
             else:
                 left = max(0.0, args.cool - (now - t_phase))
                 more = f"あと{left:.0f}秒" if left > 0 else f"{args.temp_resume:.0f}℃まで冷ます"
@@ -311,6 +319,10 @@ def main():
                 trip(now, "PICO left X/Y")
             if rds.exists("teleop_stop"):
                 trip(now, "stop command (teleop_stop)")
+            hold = bool(rds.exists("play_hold"))   # g1.sh pause (deleted by g1.sh resume)
+            if hold != last_hold:
+                print(f"[{t:6.1f}s] {'pause (play_hold set)' if hold else 'resume (play_hold deleted)'}")
+                last_hold = hold
             if active and bstate in ("ESTOP_RAMP", "STOPPED"):
                 trip(now, "bridge stopped: " + str(b.get("reason", "")))
             if active and phase not in ("ENGAGE",) and b is None:
@@ -381,6 +393,8 @@ def main():
                     end_why = "work time"
                 elif a_press:
                     end_why, paused = "right A: pause", True
+                elif hold:
+                    end_why = "pause (g1.sh pause)"
                 if end_why:
                     stats[-1].update({"work_s": round(work_t, 1), "end": end_why, "temp_end": temp, "joint_end": tj})
                     print(f"[{t:6.1f}s] work #{cycle} ends after {work_t:.1f} s: {end_why}")
@@ -413,7 +427,7 @@ def main():
                     finish_now(f"{cycle} cycles done")
                 elif args.duration and args.duration - t < need:
                     finish_now("not enough time left for another work period")
-                elif cooled and not paused and args.work > 0:
+                elif cooled and not paused and not hold and args.work > 0:
                     start_glide(loop[0], "WORK", now)
             elif phase == "RELEASE":
                 if bstate in ("WAIT", None) or now - t_phase > 5.0:

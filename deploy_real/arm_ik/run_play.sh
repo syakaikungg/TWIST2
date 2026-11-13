@@ -17,6 +17,9 @@
 # all: arms + waist, as before).
 # WORK=0: STAND-BY, the arms only hold the rest pose under the bridge (soft waist, ~3 Nm on waist roll instead of
 # ~5-6 Nm in the lock stand, so it cools), until the seconds run out or a stop.
+# seconds 0: no time limit, the playback (arms and waist under the bridge) runs until stop.sh. Pause the work
+# with pause.sh / g1.sh pause (the arms stay at rest, the waist stays soft, no hand-back to the lock stand) and go on
+# with pause.sh off / g1.sh resume.
 # e.g. WORK=20 COOL=90 bash run_play.sh send 900      WORK=0 bash run_play.sh send 3600
 # Stop: left X/Y on the PICO (if connected), ~/nextech/arm_ik/stop.sh (g1.sh stop on the PC), or the remote's
 # L2+B (whole-body damping, last resort). The bridge also stops by itself on MAX_TEMP, tracking error, lowstate gap.
@@ -38,7 +41,8 @@ case "$TEMP_PAUSE" in [4-7][0-9]) ;; *) echo "TEMP_PAUSE must be 40..79"; exit 1
 case "$TEMP_RESUME" in [3-7][0-9]) ;; *) echo "TEMP_RESUME must be 30..79"; exit 1 ;; esac
 [ "$TEMP_PAUSE" -lt "$MAX_TEMP" ] || { echo "TEMP_PAUSE ($TEMP_PAUSE) must be below MAX_TEMP ($MAX_TEMP)"; exit 1; }
 [ "$TEMP_RESUME" -lt "$TEMP_PAUSE" ] || { echo "TEMP_RESUME ($TEMP_RESUME) must be below TEMP_PAUSE ($TEMP_PAUSE)"; exit 1; }
-[ "${SECS%.*}" -ge 30 ] || { echo "seconds must be 30 or more"; exit 1; }
+[ "${SECS%.*}" -ge 30 ] || [ "${SECS%.*}" -eq 0 ] || { echo "seconds must be 30 or more (0 = until stop.sh)"; exit 1; }
+PLAY_SECS=$(( ${SECS%.*} > 0 ? ${SECS%.*} - 2 : 0 ))
 case "$PICO" in 0) PICO_ARG="" ;; 1) PICO_ARG="--pico" ;; *) echo "PICO must be 0 or 1"; exit 1 ;; esac
 cd ~/nextech/arm_ik || exit 1
 [ -r "$MOTION" ] || { echo "no motion file $MOTION"; exit 1; }
@@ -59,7 +63,7 @@ BR_PID=$!
 echo "bridge pid $BR_PID"
 sleep 4
 nohup "$PY" -u play_motion.py --motion "$MOTION" --work "$WORK" --cool "$COOL" --temp-pause "$TEMP_PAUSE" \
-  --temp-resume "$TEMP_RESUME" --temp-scope "$TEMP_SCOPE" --cycles "$CYCLES" --duration $(( ${SECS%.*} - 2 )) --speed "$SPEED" --max-vel "$VEL" \
+  --temp-resume "$TEMP_RESUME" --temp-scope "$TEMP_SCOPE" --cycles "$CYCLES" --duration "$PLAY_SECS" --speed "$SPEED" --max-vel "$VEL" \
   $PICO_ARG > "$L/play_motion_${MODE}_$TS.txt" 2>&1 < /dev/null &
 PLAY_PID=$!
 echo "play pid $PLAY_PID"

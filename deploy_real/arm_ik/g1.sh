@@ -14,6 +14,8 @@
 #                                           motions/drill_work.json) with cool-down breaks; send MOVES the arms (explicit
 #                                           go only, robot hanging in the lock stand). Defaults 600 s (send) / 60 s (dry).
 #                                           Settings WORK COOL TEMP_PAUSE TEMP_RESUME MAX_TEMP CYCLES SPEED PICO (run_play.sh)
+#   g1.sh pause | resume                    pause.sh: the playback's work stops / goes on; the arms stay at rest and
+#                                           the waist stays soft under the bridge (no lock stand). play send 0 = no limit
 #   g1.sh stop                              stop.sh: the arms go back to the robot's own controller in 3 s (= left X)
 #   g1.sh status                            what runs on the G1 (read only): teleop state, ports, camera
 #   g1.sh ssh                               a shell on the G1
@@ -32,7 +34,7 @@ if [ ! -r "$KEY" ]; then
   echo "  ssh-keygen -t ed25519 -f $KEY && ssh-copy-id -i $KEY.pub $HOST"
   exit 1
 fi
-usage() { sed -n 4,26p "$0"; exit 1; }
+usage() { sed -n 4,28p "$0"; exit 1; }
 TTY=(); [ -t 0 ] && TTY=(-t)    # a terminal only when there is one (Claude runs this without one)
 
 cmd=${1:-}
@@ -89,6 +91,12 @@ case "$cmd" in
     ;;
   stop)
     exec "${SSH[@]}" "bash ~/nextech/arm_ik/stop.sh"
+    ;;
+  pause)
+    exec "${SSH[@]}" "bash ~/nextech/arm_ik/pause.sh on"
+    ;;
+  resume)
+    exec "${SSH[@]}" "bash ~/nextech/arm_ik/pause.sh off"
     ;;
   status)
     exec "${SSH[@]}" 'bash ~/nextech/arm_ik/state.sh 2>&1

@@ -6,7 +6,7 @@ set -eu
 HOST=${G1_HOST:-unitree@192.168.123.164}
 KEY=${G1_KEY:-$HOME/.ssh/id_ed25519_g1}
 cd "$(dirname "$0")"
-FILES="play_motion.py design_motion.py tool_df033d.py log_to_motion.py run_play.sh run_live.sh arm_sim.py render_front.py"
+FILES="play_motion.py arm_sdk_bridge.py pause.sh design_motion.py tool_df033d.py log_to_motion.py run_play.sh run_live.sh arm_sim.py render_front.py"
 for f in $FILES motions/drill_work.json motions/drill_work_down.json; do [ -r "$f" ] || { echo "missing $f (wrong branch? git checkout claude/project-thread-a5zqv6)"; exit 1; }; done
 B=bak_$(date +%Y%m%d_%H%M%S)
 ssh -i "$KEY" -o ConnectTimeout=8 "$HOST" "cd ~/nextech/arm_ik && mkdir -p motions && for f in $FILES motions/drill_work.json motions/drill_work_down.json; do [ -e \$f ] && cp -p \$f \$f.$B; done; ps -eo cmd | grep -E 'arm_sdk_bridge|arm_ik_dryrun|play_motion' | grep -v grep && echo 'NOTE: a bridge / IK / playback is running; the new files take effect at its next start' || true"
