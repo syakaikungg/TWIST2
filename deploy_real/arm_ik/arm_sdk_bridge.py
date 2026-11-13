@@ -282,6 +282,13 @@ def main():
     next_t = t_start
     leaving = False
 
+    def part_temp(key, a, b):
+        tt = state["temp"]
+        if tt is None:
+            return {key + "_temp": 0.0, key + "_joint": ""}
+        k = a + int(np.argmax(tt[a:b]))
+        return {key + "_temp": round(float(tt[k]), 1), key + "_joint": JOINT_NAMES[k]}
+
     def report(now):
         ramp_left = (1.0 - weight) * args.ramp_up if mode == "RAMP_UP" else 0.0   # for the operator display
         k = state["temp_cmd_id"]
@@ -292,6 +299,10 @@ def main():
                                                         "temp_joint": JOINT_NAMES[JOINT_IDX.index(k)]
                                                         if k in JOINT_IDX else "",
                                                         "max_temp": args.max_temp,
+                                                        # arms only / waist only, so the playback's cool-down can
+                                                        # ignore the waist (it does not move it)
+                                                        **part_temp("arm", 0, len(ARM_IDX)),
+                                                        **part_temp("waist", len(ARM_IDX), len(JOINT_IDX)),
                                                         "leg_temp": round(state["temp_leg_max"], 1),
                                                         "leg_joint": LEG_NAMES[state["temp_leg_id"]]
                                                         if 0 <= state["temp_leg_id"] < len(LEG_NAMES) else ""}))

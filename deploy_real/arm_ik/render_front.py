@@ -75,7 +75,7 @@ def find_model(path):
     raise SystemExit("model not found; pass --model (tried: %s)" % ", ".join(MODEL_CANDIDATES))
 
 
-def build_model(xml, drill, width, height):
+def build_model(xml, drill, width, height, tool="drill"):
     spec = mujoco.MjSpec.from_file(xml)
     keep = set(JOINT_NAMES)
     for a in list(spec.actuators):
@@ -89,7 +89,10 @@ def build_model(xml, drill, width, height):
             spec.delete(j)
     for k in list(spec.keys):
         spec.delete(k)
-    if drill:
+    if tool == "df033d":     # the real tool (tool_df033d.py), drawn only
+        import tool_df033d
+        tool_df033d.add_tool(spec, collision=False)
+    elif drill:
         sim_drill.add_drill(spec)
     m = spec.compile()
     m.vis.global_.offwidth = max(width, m.vis.global_.offwidth)
@@ -192,6 +195,8 @@ def main():
     ap.add_argument("--drill-rps", type=float, default=3.0)
     ap.add_argument("--model", default="")
     ap.add_argument("--no-drill", action="store_true")
+    ap.add_argument("--tool", choices=["drill", "df033d"], default="drill",
+                    help="df033d: draw the real tool of tool_df033d.py instead of the provisional drill")
     ap.add_argument("--shadows", action="store_true")
     args = ap.parse_args()
 
@@ -216,8 +221,8 @@ def main():
         vt[k] = vt[k - 1] + min(ts[idx[k]] - ts[idx[k - 1]], args.max_gap)
     n_frames = int(vt[-1] * args.fps) + 1
 
-    drill = sim_drill is not None and not args.no_drill
-    m = build_model(find_model(args.model), drill, args.width, args.height)
+    drill = sim_drill is not None and not args.no_drill and args.tool == "drill"
+    m = build_model(find_model(args.model), drill, args.width, args.height, tool=args.tool)
     d = mujoco.MjData(m)
     qadr = {n: m.jnt_qposadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, n)] for n in JOINT_NAMES}
     body_id = {mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, b): b for b in range(m.nbody)}

@@ -12,6 +12,11 @@ NexTech Week 2026 秋の展示用。G1 の内蔵PC（`~/nextech/arm_ik/`）で�
 | `sim_run.sh` / `sim_live_bg.sh` | シミュレーターでの自動テスト / PICO で操作する live |
 | `run_live.sh` | 実機。`run_live.sh dry` はロボットに送らずに動かす（既定60秒）、`run_live.sh send` は `--send` で送る（既定180秒、本人の確認後にだけ使う）。上限は既定0.5 rad/s、手先0.6 m/s。4番目の引数は右手首の当たり判定（`hand` が既定、ドリルを付けたら `drill`）。温度の上限は `MAX_TEMP=80 bash run_live.sh send` のように変えられる（50〜80℃、既定75℃。11/4 に60→65℃、11/10 に本人の依頼で65→70℃、同じ日に本人の選択で70→75℃、80℃も可）。`MAX_TEMP=none` は温度で止めない測定用（11/10 本人の依頼、映像の警告は65℃から、吊って左 X をすぐ押せるときだけ）。`TEMP_PAUSE=65` で、その温度で最初の姿勢に戻って一時停止し、`TEMP_RESUME`（60℃）以下で A を受け付ける（既定はオフ、40〜79℃で MAX_TEMP より下。例 `MAX_TEMP=80 TEMP_PAUSE=75 TEMP_RESUME=70` は75℃で休み、80℃で止まる） |
 | `stop.sh` | 非常停止（Redis `teleop_stop`） |
+| `play_motion.py` / `run_play.sh` | 自動再生（展示用、11/12〜）。決まった腕の動き（動きのファイル）を、作業と休憩を挟んで繰り返す。IK の代わりにブリッジへ角度を渡すので、ブリッジの見張りはそのまま。`g1.sh play send 600` で起動。下の「自動再生」 |
+| `design_motion.py` | 自動再生の「ドライバー作業」の動き（`motions/drill_work.json`）を、シミュレーターのモデルで重力のトルクが小さくなるように作る |
+| `tool_df033d.py` | 右手首の実物の工具（マキタ DF033D と取り付け板。ドリルの寸法と重さはマキタの仕様、付け方は11/12 の写真から、板・カプラー・サーボの重さは推定）の形と重さ。`arm_sim.py --tool df033d`、`render_front.py --tool df033d`、`design_motion.py` が使う（テレオペの IK の当たり判定は今までどおり `sim_drill.py`） |
+| `log_to_motion.py` | テレオペのログ（ブリッジか IK の CSV）の好きな区間を、自動再生の動きのファイルにする |
+| `place_play.sh` | 操作用のPCから、自動再生のファイルを G1 の `~/nextech/arm_ik/` に置く（置き換えるファイルは `.bak_日時` で残す） |
 | `after_boot.sh` | G1 を再起動したあとの準備（Redis と PC Service、頭カメラの USB 省電力オフ、頭カメラ → PICO を `0.0.0.0:13579` で待つ＝有線と Wi-Fi の両方。`CAM_LISTEN` で変えられる）。`install_autostart.sh` のあとは sudo を使わず、パスワードも聞かない。ロボットは動かさない |
 | `install_autostart.sh` | G1 で1回だけ（sudo のパスワード1回、`g1.sh autostart`）。Docker の Redis と PC Service に restart=unless-stopped を付けて G1 の起動で自動で立ち上げ、頭カメラの USB 省電力オフを udev の規則にする。権限（sudoers・グループ・SSH）は変えない。`--check` で今の状態、`--undo` で元に戻す |
 | `g1.sh` | 操作用のPC（Ubuntu、またはノートPCの WSL）で使う。`g1.sh up`（= after_boot.sh）、`g1.sh autostart`（= install_autostart.sh、1回だけ）、`g1.sh dry\|send [速さ] [秒] [tool]`（= run_live.sh）、`g1.sh stop`（= stop.sh）、`g1.sh status`、`g1.sh ssh` を SSH で G1 に頼むだけ |
@@ -39,6 +44,49 @@ NexTech Week 2026 秋の展示用。G1 の内蔵PC（`~/nextech/arm_ik/`）で�
 ## 入力の記録と再生
 
 IK は、PICO からの入力（頭と両手の位置と向き、ボタン、グリップ、トリガー、データの時刻）を、CSV の隣の `*_input.jsonl` に毎回書く（約20 kB/秒、`--no-record-input` で止める）。`--replay その.jsonl` で、同じ入力をそのときの時刻どおりに IK に流せる（PICO と Redis は使わない、ロボットには何も送らない）。設定を変えて2回流し、`compare_replay.py A.csv B.csv` で手の位置の差を見る。例：今の設定と、11/4 までの計算（`--heading per_arm --neck-back 0 --neck-down 0`）。同じ設定で流すと、元の自己テストと差は0.0 cm だった。11/4 までの記録は `csv_to_input.py` でおおよその入力に直せる（前の向きの比べ方には使えるが、首の位置の推定は頭の傾きが無いので比べられない）。
+
+## 自動再生（展示用）
+
+PICO を誰もかぶらずに、決まった腕の動きを繰り返す（11/12 本人：展示中はキャリブレーションの時間がない。モーターが熱くなるので、動く時間を短くしてクールタイムを挟んで繰り返したい。右手首の電動ドライバー（回さない）で作業している風の、小さいけれど動いているのが分かる動き）。
+
+流れ：今の姿勢から休む姿勢（腕を下ろしてドライバーを下に向ける）へゆっくり移る → **作業**（動きの1周を `WORK` 秒くり返す）→ 休む姿勢へ → **休憩**（`COOL` 秒以上、かつ腕と腰でいちばん熱いモーターが `TEMP_RESUME` 以下になるまで）→ 作業 … 作業中に `TEMP_PAUSE` に届いたら早めに休む。最後は、始めたときの姿勢へ戻ってから純正の制御に返す（重み2秒で0）。ブリッジの見張り（`MAX_TEMP` の非常停止、ずれ、lowstate）はテレオペと同じ。
+
+```bash
+bash g1.sh play send 600                         # 操作用のPCから。腕が動く（本人の確認のあと、吊ってロック立ち）
+WORK=20 COOL=90 bash g1.sh play send 900         # 作業20秒・休憩90秒
+TEMP_PAUSE=62 TEMP_RESUME=55 bash g1.sh play send 600
+bash g1.sh play dry                              # 送らずに起動だけ確かめる（腕が動かないので、移り始めるとずれの見張りで止まる）
+bash g1.sh stop                                  # 止める（= PICO の左 X）
+```
+
+既定：作業30秒、休憩60秒以上、65℃で早めに休む、58℃以下で再開、ブリッジは75℃で非常停止、関節の速さ0.5 rad/s（動きは0.4 rad/s 以下で作ってある）。`PICO=1`（既定）なら、PICO がつながっているときは左 X/Y で非常停止、右 A で「休む姿勢で一時停止／再開」。PICO がつながっていなくても再生は続く（止めるのは PC から）。PICO の映像には「自動再生 2回目 作業中 あと12秒 ／ 右肩 58℃」「休憩中 あと40秒 ／ 右肘 61℃」と出る。ログは G1 の `~/nextech_setup/logs/play_motion_*.csv`（毎フレームの指令・実測・温度）と `play_motion_*_日時.txt`（作業・休憩ごとの温度）。
+
+### 動き `motions/drill_work.json`（`design_motion.py` で作る）
+
+- 上腕は下ろして少し後ろ、前腕を斜め前下に出し、手首を上に曲げて、ドライバーを前に水平に向ける（人がドリルを持つ向き：グリップとバッテリーが下。11/12 本人「前に水平に出したい」）。チャックの先は肩から約31cm前。ネジ3か所（正面、外へ7cm、外へ14cm）で、4cm 押し込みながら手首を0.4 rad ひねり（ネジを締める風）、戻す。1周約19秒。内側へ動かすと手首の下のバッテリーが股関節に近づくので、外側だけに動かす
+- 腕を前に伸ばす、横に大きく開く、肘を伸ばしきる動きは使わない（11/10 の実測で熱くなった姿勢）
+- 左腕は下ろしたまま、腰はまっすぐ（ブリッジの `--waist-level`）
+- 重力のトルクの見積もり（工具は推定1.38 kg、`tool_df033d.py`）：作業中の RMS で右肩 pitch 2.0、右肩 roll 2.2、右肩 yaw 1.3、右肘 4.6、右手首 pitch 2.8 Nm。11/10 の追従中の実測は右肩 pitch 平均4〜6 Nm、横に開くと肩 roll 7〜11 Nm、右肘5.2 Nm（180秒で47→61℃）なので、いちばん温まりやすいのは右肘。休む姿勢は右肘0.1、右手首 pitch 0.0、右肩 roll 2.9 Nm（純正のロック立ちの腕の姿勢だと右肘2.3、手首 pitch 1.5、肩 roll 2.5 Nm）
+- `motions/drill_work_down.json`：ドライバーを約33°下に向ける版（11/12 の最初の案）。右肩 pitch 0.8、roll 4.4、肘2.7、手首 pitch 2.4 Nm で、肘が楽な代わりに肩 roll が重い。`bash g1.sh play send 600 motions/drill_work_down.json`
+- 体や左腕から4cm 以上（モデルの凸包で）離す。シミュレーター（`arm_sim.py --tool df033d`＋ブリッジ `--sim`）で接触なし
+- 右手首 pitch は小さいモーター（最大5 Nm）なので、最初の実機では温度を見る
+
+作り直し：`python3 design_motion.py --out motions/drill_work.json`（`--down -2,4`（ドライバーの下向きの角度、既定は水平）、`--tip-x 0.30`（チャックの先を肩から何m前に）、`--spots 0,-0.07,-0.14`（ネジの横の位置）、`--push 0.04`、`--twist 0.4`、`--max-vel 0.4`）。下向きの版は `--down 30,50 --tip-x 0.22 --out motions/drill_work_down.json`。工具の寸法・重さが分かったら `tool_df033d.py` の `PARTS` を直して作り直す。
+
+### テレオペで動きを作る
+
+テレオペのログは毎回 G1 に残っている。好きな区間を切り出して、同じように繰り返せる。
+
+```bash
+# G1 で（--from/--to はブリッジの CSV の t 列の秒。ブリッジのログの「[  35.2s] TRACK」と同じ時計）
+cd ~/nextech/arm_ik
+~/miniforge3/envs/gmr/bin/python log_to_motion.py ~/nextech_setup/logs/arm_sdk_bridge_send_YYYYMMDD_HHMMSS.csv \
+    --from 40 --to 70 --out motions/teleop_1.json [--pingpong]
+# 操作用のPCから
+bash g1.sh play send 600 motions/teleop_1.json
+```
+
+休む姿勢は `motions/drill_work.json` のものを使う（`--rest-from first` で区間の最初の姿勢）。区間の最後と最初がずれていれば、1周ごとにゆっくり最初へ戻る（`--pingpong` なら往復して戻る）。0.5 rad/s より速い所があると再生しない。
 
 ## 操作（PICO）
 

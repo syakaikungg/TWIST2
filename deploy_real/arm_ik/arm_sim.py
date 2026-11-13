@@ -46,10 +46,12 @@ ARMATURE = {"N5020": 0.003609725, "W4010": 0.00425, "N7520-14": 0.01017752}
 JOINT_MOTOR = {n: "N5020" for n in ARM_NAMES}
 JOINT_MOTOR.update({n: "W4010" for n in WRIST_5NM})
 JOINT_MOTOR.update({"waist_yaw_joint": "N7520-14", "waist_roll_joint": "N5020", "waist_pitch_joint": "N5020"})
-ARM_BODY_KEYS = ("shoulder", "elbow", "wrist", "rubber_hand", "drill")   # drill_body, drill_bit, drill_payload
+ARM_BODY_KEYS = ("shoulder", "elbow", "wrist", "rubber_hand", "drill", "tool_")   # drill_*, tool_df033d
 
 
-def build_model(payload_kg, payload_offset, drill=True):
+def build_model(payload_kg, payload_offset, drill=True, tool="drill"):
+    """tool: "drill" = the provisional drill of sim_drill.py (no mass; --payload-kg adds a mass), "df033d" = the
+    real tool (tool_df033d.py: Makita DF033D on its plate, with its estimated masses; payload_kg is ignored)."""
     spec = mujoco.MjSpec.from_file(MODEL)
     keep = set(JOINT_NAMES)
     for a in list(spec.actuators):
@@ -69,6 +71,11 @@ def build_model(payload_kg, payload_offset, drill=True):
             j.actfrcrange = [-5.0, 5.0]
         if j.name in JOINT_MOTOR:
             j.armature = ARMATURE[JOINT_MOTOR[j.name]]
+    if tool == "df033d":
+        import tool_df033d
+        tool_df033d.add_tool(spec, collision=True)
+        sim_drill.add_hand_collision(spec, "left_rubber_hand")
+        return spec.compile()
     if payload_kg > 0:
         wrist = spec.body("right_wrist_yaw_link")
         hand = spec.body("right_rubber_hand")
@@ -92,13 +99,16 @@ def main():
     ap.add_argument("--payload-kg", type=float, default=0.0, help="dummy drill mass at the right hand")
     ap.add_argument("--payload-offset", type=float, default=0.05, help="beyond the hand along the forearm [m]")
     ap.add_argument("--no-drill", action="store_true", help="no drill (the hand stays)")
+    ap.add_argument("--tool", choices=["drill", "df033d"], default="drill",
+                    help="drill = provisional drill (no mass, see --payload-kg); df033d = the real tool with its "
+                         "estimated masses (tool_df033d.py)")
     ap.add_argument("--drill-rps", type=float, default=3.0, help="drawn spin speed while ON [rev/s] (not the real one)")
     ap.add_argument("--video", default="", help="mp4 path (offscreen render, needs EGL)")
     ap.add_argument("--tag", default="")
     ap.add_argument("--log-dir", default=str(Path.home() / "nextech_setup" / "logs"))
     args = ap.parse_args()
 
-    m = build_model(args.payload_kg, args.payload_offset, drill=not args.no_drill)
+    m = build_model(args.payload_kg, args.payload_offset, drill=not args.no_drill, tool=args.tool)
     d = mujoco.MjData(m)
     drill_view = sim_drill.DrillView(m)
     spin = sim_drill.DrillSpin(rps=args.drill_rps)
@@ -119,7 +129,7 @@ def main():
 
     names_b = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, b) or "world" for b in range(m.nbody)]
     arm_b = [any(k in n for k in ARM_BODY_KEYS) for n in names_b]
-    side_b = ["left" if n.startswith("left") else ("right" if n.startswith(("right", "drill")) else "")
+    side_b = ["left" if n.startswith("left") else ("right" if n.startswith(("right", "drill", "tool_")) else "")
               for n in names_b]
     bname = lambda b: names_b[b]
     is_arm = lambda b: arm_b[b]
@@ -168,7 +178,8 @@ def main():
                  + [f"cmd_{n}" for n in JOINT_NAMES] + [f"tau_{n}" for n in JOINT_NAMES])
     print(f"arm_sim: model {os.path.basename(MODEL)} (pelvis+legs welded), timestep {m.opt.timestep}s, "
           f"payload {args.payload_kg} kg, wrist pitch/yaw limit 5 Nm, motor armature added, "
-          f"drill {'off' if args.no_drill else 'drawn'}, log {log_path}")
+          f"tool {args.tool}" + (f" ({__import__('tool_df033d').MASS:.2f} kg, payload ignored)" if args.tool == "df033d" else
+          f", drill {'off' if args.no_drill else 'drawn'}") + f", log {log_path}")
     if baseline:
         print("contacts already present in the standing pose (ignored as baseline):", list(baseline))
 
